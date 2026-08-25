@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+printf 'pre-commit: gofmt\n'
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+	printf 'these files are not gofmt-clean:\n%s\n' "$unformatted" >&2
+	exit 1
+fi
+
+printf 'pre-commit: go vet\n'
+go vet ./...
+
+printf 'pre-commit: go test\n'
+go test ./...
+
+if command -v gitleaks >/dev/null 2>&1; then
+	printf 'pre-commit: gitleaks\n'
+	gitleaks protect --staged --redact --no-banner
+else
+	printf 'pre-commit: gitleaks not installed, skipping secret scan\n' >&2
+fi
+
+if command -v gosec >/dev/null 2>&1; then
+	printf 'pre-commit: gosec\n'
+	gosec -quiet -severity medium -confidence medium ./...
+else
+	printf 'pre-commit: gosec not installed, skipping static security scan\n' >&2
+fi

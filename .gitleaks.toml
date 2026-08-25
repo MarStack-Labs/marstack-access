@@ -1,0 +1,11 @@
+title = "marstack-access"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Paths that never carry real credentials"
+paths = [
+  '''go\.sum''',
+  '''LICENSE''',
+]

@@ -1,0 +1,11 @@
+bin/
+data/
+*.db
+*.db-shm
+*.db-wal
+*.pem
+*.key
+*_ca
+*_ca.pub
+*.cast
+.DS_Store
