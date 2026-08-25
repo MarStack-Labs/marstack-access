@@ -97,8 +97,9 @@ These hold everywhere. A change that weakens one is a design change, not a refac
 This repository is mostly privilege boundaries and network plumbing, so these rules are specific and
 non-negotiable.
 
-- **Host keys are verified.** `ssh.InsecureIgnoreHostKey` never appears. A target's host key is
-  pinned on first registration and a change fails the session loudly.
+- **Host keys are verified.** `ssh.InsecureIgnoreHostKey` never appears, and an architecture test
+  fails the build if it does. A target's host key is pinned before any session can open, and
+  replacing a pin has to be asked for.
 - **`crypto/rand` only.** `math/rand` has no legitimate use in this repository.
 - **Secrets compare in constant time.** Token and MAC comparison uses `crypto/subtle`.
 - **Every connection carries a deadline.** A `net.Conn` without a read and write deadline is a
@@ -322,6 +323,32 @@ controls.
 generating a replacement would invalidate every client's stored key at the same moment, which is
 indistinguishable from a man-in-the-middle and teaches operators to click through the warning. The
 fingerprint is logged at startup so it can be pinned.
+
+## Pinning a target's host key
+
+A target's identity is a pinned host key. A target registered without one is reachable by nobody: the
+data plane refuses with `host_key_not_pinned` rather than connecting to whatever answers.
+
+**Pinning is a separate act from registering, and that is deliberate.** Registering a target is
+inventory; pinning is a claim about which machine that inventory entry means. Requiring the key at
+registration would look stricter and buy nothing, because the usual source is `ssh-keyscan`, which is
+itself trust-on-first-use — it simply reports whatever the host offered. Moving that step into the
+operator's shell does not make it verified. What is worth having is the second half: once pinned, a
+change is refused.
+
+**Replacing a pin needs `--replace`.** A silent replacement is how a man-in-the-middle becomes
+permanent: an attacker who can answer for the address once gets their key written down as the truth.
+Re-pinning the identical key is also a conflict, because a caller that cannot tell "already correct"
+from "silently changed" cannot act on either.
+
+**`ssh-keyscan` output is accepted as-is, and more than one key is refused.** `sshkey.ParseHostKey`
+takes known-hosts format or a plain key line, skips the comment header, and normalises to a single
+`authorized_keys` line so one key always has one fingerprint. Without `-t`, `ssh-keyscan` emits one
+line per algorithm; pinning whichever came first would leave the pin on a key type the client may
+never negotiate, so an ambiguous scan is an error that names the fix.
+
+**The stored key is never echoed back.** Views carry the fingerprint, which is what an operator
+matches against `ssh-keyscan` or their own `known_hosts`.
 
 ## Session certificates
 

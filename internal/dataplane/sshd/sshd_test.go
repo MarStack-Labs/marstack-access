@@ -45,6 +45,7 @@ func newStubs() *stubs {
 			"db-1": {
 				ID: dbTargetID, Name: "db-1", Address: "10.0.0.4", Port: 22,
 				Principals: []string{"deploy", "postgres"},
+				HostKey:    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPRgofQjYk3eRPaZxnxDvFK/9Dp87Ki7q596HY3FO2SA",
 			},
 		},
 	}
@@ -532,5 +533,23 @@ func TestExecIsTreatedLikeAShell(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "authorized") {
 		t.Fatalf("exec output = %q, want the same verdict a shell gets", out)
+	}
+}
+
+func TestATargetWithNoPinnedHostKeyIsRefused(t *testing.T) {
+	st, signer := registeredAlice(t)
+	unpinned := st.targets["db-1"]
+	unpinned.HostKey = ""
+	st.targets["db-1"] = unpinned
+
+	srv, addr := startServer(t, st)
+
+	res := dial(t, srv, addr, "deploy:db-1", signer)
+
+	if res.err == nil {
+		t.Fatal("a session opened against a host whose identity has never been verified")
+	}
+	if !strings.Contains(res.stderr, "no pinned host key") {
+		t.Fatalf("stderr = %q, want it to name the missing pin", res.stderr)
 	}
 }

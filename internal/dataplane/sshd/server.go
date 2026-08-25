@@ -28,6 +28,7 @@ type Target struct {
 	Address    string
 	Port       int
 	Principals []string
+	HostKey    string
 }
 
 type Identities interface {

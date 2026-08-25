@@ -8,19 +8,20 @@ import (
 )
 
 type targetView struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Address    string   `json:"address"`
-	Port       int      `json:"port"`
-	Principals []string `json:"principals"`
-	CreatedAt  string   `json:"created_at"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Address     string   `json:"address"`
+	Port        int      `json:"port"`
+	Principals  []string `json:"principals"`
+	Fingerprint string   `json:"host_key_fingerprint,omitempty"`
+	CreatedAt   string   `json:"created_at"`
 }
 
 type targetListView struct {
 	Targets []targetView `json:"targets"`
 }
 
-var targetHeaders = []string{"NAME", "ID", "ADDRESS", "PORT", "PRINCIPALS", "CREATED"}
+var targetHeaders = []string{"NAME", "ID", "ADDRESS", "PORT", "PRINCIPALS", "HOST KEY", "CREATED"}
 
 func targetRow(t targetView) []string {
 	principals := strings.Join(t.Principals, ",")
@@ -34,6 +35,7 @@ func targetRow(t targetView) []string {
 		t.Address,
 		strconv.Itoa(t.Port),
 		principals,
+		dashIfEmpty(t.Fingerprint),
 		t.CreatedAt,
 	}
 }
@@ -49,6 +51,7 @@ func newTargetCmd(g *globals) *cobra.Command {
 		newTargetListCmd(g),
 		newTargetGetCmd(g),
 		newTargetDeleteCmd(g),
+		newTargetTrustCmd(g),
 	)
 	return cmd
 }
@@ -152,4 +155,48 @@ func renderTarget(cmd *cobra.Command, g *globals, t targetView) error {
 		headers: targetHeaders,
 		rows:    [][]string{targetRow(t)},
 	})
+}
+
+func newTargetTrustCmd(g *globals) *cobra.Command {
+	var req struct {
+		HostKey string `json:"host_key"`
+		Replace bool   `json:"replace"`
+	}
+	var target string
+
+	cmd := &cobra.Command{
+		Use:   "trust",
+		Short: "Pin the host key the platform will verify a target by",
+		Long: "Pin a host key. Pipe it in, usually from ssh-keyscan:\n\n" +
+			"  ssh-keyscan -t ed25519 10.0.0.4 | marac target trust --target tgt-xxx\n\n" +
+			"Replacing an existing pin needs --replace, because a silent replacement is how a\n" +
+			"man-in-the-middle becomes permanent.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if req.HostKey == "" {
+				piped, err := readPipedKey(cmd)
+				if err != nil {
+					return err
+				}
+				req.HostKey = piped
+			}
+
+			var updated targetView
+			if err := newClient(g).do(
+				cmd.Context(), "POST", "/v1/targets/"+target+"/host-key", req, &updated,
+			); err != nil {
+				return err
+			}
+			return renderTarget(cmd, g, updated)
+		},
+	}
+
+	cmd.Flags().StringVar(&target, "target", "", "target id to pin")
+	cmd.Flags().StringVar(&req.HostKey, "host-key", "",
+		"the host key line, or omit it and pipe the key on stdin")
+	cmd.Flags().BoolVar(&req.Replace, "replace", false, "replace an existing pin")
+
+	must(cmd.MarkFlagRequired("target"))
+
+	return cmd
 }

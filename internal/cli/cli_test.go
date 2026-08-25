@@ -1112,3 +1112,87 @@ func TestCAShowRejectsAMissingKey(t *testing.T) {
 		t.Fatal("expected an error for a missing key")
 	}
 }
+
+func TestTargetTrustPipesSSHKeyscanOutput(t *testing.T) {
+	var received map[string]any
+
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if want := "/v1/targets/tgt-abc/host-key"; r.URL.Path != want {
+			t.Errorf("path = %q, want %q", r.URL.Path, want)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		writeJSON(t, w, http.StatusOK, targetView{
+			ID: "tgt-abc", Name: "db-1", Port: 22, Fingerprint: "SHA256:abc",
+		})
+	})
+
+	scanned := "# 10.0.0.4:22 SSH-2.0-OpenSSH_9.6\n10.0.0.4 ssh-ed25519 AAAAC3Nz\n"
+
+	out, err := runWithStdin(t, strings.NewReader(scanned),
+		"--endpoint", endpoint, "target", "trust", "--target", "tgt-abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v (%s)", err, out)
+	}
+
+	sent, _ := received["host_key"].(string)
+	if !strings.Contains(sent, "ssh-ed25519") {
+		t.Fatalf("host_key = %q, want the scanned key", sent)
+	}
+	if !strings.Contains(out, "SHA256:abc") {
+		t.Errorf("output does not show the pinned fingerprint: %s", out)
+	}
+}
+
+func TestTargetTrustSendsReplaceOnlyWhenAsked(t *testing.T) {
+	var received map[string]any
+
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		writeJSON(t, w, http.StatusOK, targetView{ID: "tgt-abc"})
+	})
+
+	if _, err := runAgainst(t, endpoint, "target", "trust",
+		"--target", "tgt-abc", "--host-key", "ssh-ed25519 AAAA"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if replace, _ := received["replace"].(bool); replace {
+		t.Error("replace was sent true without the flag")
+	}
+
+	if _, err := runAgainst(t, endpoint, "target", "trust",
+		"--target", "tgt-abc", "--host-key", "ssh-ed25519 AAAA", "--replace"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if replace, _ := received["replace"].(bool); !replace {
+		t.Error("replace was not sent even with the flag")
+	}
+}
+
+func TestTargetListShowsTheHostKeyColumn(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, targetListView{Targets: []targetView{
+			{ID: "tgt-abc", Name: "db-1", Address: "10.0.0.4", Port: 22,
+				Principals: []string{"deploy"}},
+			{ID: "tgt-def", Name: "db-2", Address: "10.0.0.5", Port: 22,
+				Principals: []string{"deploy"}, Fingerprint: "SHA256:abc"},
+		}})
+	})
+
+	out, err := runAgainst(t, endpoint, "target", "list")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "HOST KEY") {
+		t.Errorf("output has no HOST KEY column: %s", out)
+	}
+	if !strings.Contains(out, "SHA256:abc") {
+		t.Errorf("output does not show a pinned fingerprint: %s", out)
+	}
+	if !strings.Contains(out, "-") {
+		t.Errorf("an unpinned target shows no placeholder, so it is hard to spot: %s", out)
+	}
+}

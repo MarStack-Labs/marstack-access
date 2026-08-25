@@ -2,6 +2,8 @@ package target
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,7 +13,10 @@ import (
 	"time"
 
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
+	"golang.org/x/crypto/ssh"
+
 	"github.com/marstack-labs/marstack-access/internal/kernel/logging"
+	"github.com/marstack-labs/marstack-access/internal/kernel/sshkey"
 	"github.com/marstack-labs/marstack-access/internal/store"
 )
 
@@ -418,13 +423,207 @@ func TestEveryRouteRequiresTheOperatorRole(t *testing.T) {
 	guard := &recordingGuard{}
 	New(st, logging.New("error", io.Discard), guard).Routes(http.NewServeMux())
 
-	if len(guard.roles) != 4 {
-		t.Fatalf("%d routes declared a role, want 4: a route that skips the guard is reachable unauthenticated",
+	if len(guard.roles) != 5 {
+		t.Fatalf("%d routes declared a role, want 5: a route that skips the guard is reachable unauthenticated",
 			len(guard.roles))
 	}
 	for _, role := range guard.roles {
 		if role != authz.RoleOperator {
 			t.Errorf("a route requires %q, want %q", role, authz.RoleOperator)
 		}
+	}
+}
+
+func hostKeyLine(t *testing.T) string {
+	t.Helper()
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	return string(ssh.MarshalAuthorizedKey(signer.PublicKey()))
+}
+
+func TestATargetStartsWithNoPinnedHostKey(t *testing.T) {
+	_, h := newTestModule(t)
+
+	view := registerTarget(t, h, `{"name":"db-1","address":"10.0.0.4","principals":["deploy"]}`)
+
+	if view.Fingerprint != "" {
+		t.Fatalf("fingerprint = %q, want empty: nothing has verified this host yet", view.Fingerprint)
+	}
+}
+
+func TestTrustPinsTheHostKeyAndReportsItsFingerprint(t *testing.T) {
+	_, h := newTestModule(t)
+	created := registerTarget(t, h, `{"name":"db-1","address":"10.0.0.4","principals":["deploy"]}`)
+
+	raw := strings.TrimSpace(hostKeyLine(t))
+	rec := send(t, h, http.MethodPost, "/v1/targets/"+created.ID+"/host-key",
+		`{"host_key":"`+raw+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body)
+	}
+
+	var view targetView
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	want, err := sshkey.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if view.Fingerprint != want.Fingerprint {
+		t.Fatalf("fingerprint = %q, want %q", view.Fingerprint, want.Fingerprint)
+	}
+}
+
+func TestTheViewNeverCarriesTheHostKeyItself(t *testing.T) {
+	_, h := newTestModule(t)
+	created := registerTarget(t, h, `{"name":"db-1","address":"10.0.0.4","principals":["deploy"]}`)
+	raw := strings.TrimSpace(hostKeyLine(t))
+
+	rec := send(t, h, http.MethodPost, "/v1/targets/"+created.ID+"/host-key",
+		`{"host_key":"`+raw+`"}`)
+
+	if strings.Contains(rec.Body.String(), "ssh-ed25519 ") {
+		t.Fatalf("the response echoes the host key line: %s", rec.Body)
+	}
+}
+
+func TestReplacingAPinnedHostKeyMustBeAskedFor(t *testing.T) {
+	_, h := newTestModule(t)
+	created := registerTarget(t, h, `{"name":"db-1","address":"10.0.0.4","principals":["deploy"]}`)
+	first := strings.TrimSpace(hostKeyLine(t))
+	second := strings.TrimSpace(hostKeyLine(t))
+
+	send(t, h, http.MethodPost, "/v1/targets/"+created.ID+"/host-key", `{"host_key":"`+first+`"}`)
+
+	rec := send(t, h, http.MethodPost, "/v1/targets/"+created.ID+"/host-key",
+		`{"host_key":"`+second+`"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: a silent replacement is how a man-in-the-middle becomes permanent", rec.Code)
+	}
+	if got := errorCode(t, rec); got != "host_key_pinned" {
+		t.Fatalf("code = %q, want host_key_pinned", got)
+	}
+
+	replaced := send(t, h, http.MethodPost, "/v1/targets/"+created.ID+"/host-key",
+		`{"host_key":"`+second+`","replace":true}`)
+	if replaced.Code != http.StatusOK {
+		t.Fatalf("an explicit replacement was refused: %d (%s)", replaced.Code, replaced.Body)
+	}
+
+	want, err := sshkey.Parse(second)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var view targetView
+	if err := json.Unmarshal(replaced.Body.Bytes(), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if view.Fingerprint != want.Fingerprint {
+		t.Fatalf("fingerprint = %q, want the replacement %q", view.Fingerprint, want.Fingerprint)
+	}
+}
+
+func TestRepinningTheSameKeyIsStillAConflict(t *testing.T) {
+	_, h := newTestModule(t)
+	created := registerTarget(t, h, `{"name":"db-1","address":"10.0.0.4","principals":["deploy"]}`)
+	raw := strings.TrimSpace(hostKeyLine(t))
+
+	send(t, h, http.MethodPost, "/v1/targets/"+created.ID+"/host-key", `{"host_key":"`+raw+`"}`)
+
+	rec := send(t, h, http.MethodPost, "/v1/targets/"+created.ID+"/host-key", `{"host_key":"`+raw+`"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409. Treating an identical repin as a no-op sounds harmless, but it means the caller cannot tell whether the key they sent is the one that was already there",
+			rec.Code)
+	}
+}
+
+func TestTrustRejectsSomethingThatIsNotAHostKey(t *testing.T) {
+	_, h := newTestModule(t)
+	created := registerTarget(t, h, `{"name":"db-1","address":"10.0.0.4","principals":["deploy"]}`)
+
+	for label, body := range map[string]string{
+		"empty":       `{"host_key":""}`,
+		"prose":       `{"host_key":"hello world"}`,
+		"missing":     `{}`,
+		"unknown key": `{"host_key":"ssh-ed25519 AAAA","sudo":true}`,
+	} {
+		rec := send(t, h, http.MethodPost, "/v1/targets/"+created.ID+"/host-key", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400 (%s)", label, rec.Code, rec.Body)
+		}
+	}
+}
+
+func TestTrustRejectsAnUnknownTarget(t *testing.T) {
+	_, h := newTestModule(t)
+	raw := strings.TrimSpace(hostKeyLine(t))
+
+	rec := send(t, h, http.MethodPost, "/v1/targets/tgt-9999999999999/host-key",
+		`{"host_key":"`+raw+`"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestAPinnedKeySurvivesARestartAndStillParses(t *testing.T) {
+	dir := t.TempDir()
+	log := logging.New("error", io.Discard)
+	ctx := context.Background()
+	raw := strings.TrimSpace(hostKeyLine(t))
+
+	st, err := store.Open(ctx, dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	m := New(st, log, &recordingGuard{})
+	if err := st.Migrate(ctx, m.Migrations()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	mux := http.NewServeMux()
+	m.Routes(mux)
+	created := registerTarget(t, mux, `{"name":"db-1","address":"10.0.0.4","principals":["deploy"]}`)
+	send(t, mux, http.MethodPost, "/v1/targets/"+created.ID+"/host-key", `{"host_key":"`+raw+`"}`)
+	st.Close()
+
+	st2, err := store.Open(ctx, dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer st2.Close()
+	m2 := New(st2, log, &recordingGuard{})
+	if err := st2.Migrate(ctx, m2.Migrations()); err != nil {
+		t.Fatalf("re-migrate: %v", err)
+	}
+
+	reloaded, err := m2.ByName(ctx, "db-1")
+	if err != nil {
+		t.Fatalf("by name: %v", err)
+	}
+	parsed, err := sshkey.Parse(reloaded.HostKey)
+	if err != nil {
+		t.Fatalf("the stored host key does not parse back: %v", err)
+	}
+	want, _ := sshkey.Parse(raw)
+	if parsed.Fingerprint != want.Fingerprint {
+		t.Fatal("the reloaded pin is a different key")
+	}
+}
+
+func TestTheHostKeyColumnIsAddedToAnExistingTable(t *testing.T) {
+	m, _ := newTestModule(t)
+
+	migration := m.Migrations()[3]
+	if !strings.Contains(migration.SQL, "ALTER TABLE targets") {
+		t.Fatalf("migration 4 = %q, want an ALTER on the existing table. Recreating the table would drop every registered target",
+			migration.SQL)
 	}
 }

@@ -60,6 +60,7 @@ func (m *Module) Migrations() []store.Migration {
 			principal TEXT NOT NULL,
 			PRIMARY KEY (target_id, principal)
 		)`},
+		{Module: m.Name(), Index: 4, SQL: `ALTER TABLE targets ADD COLUMN host_key TEXT`},
 	}
 }
 
@@ -72,4 +73,6 @@ func (m *Module) Routes(mux *http.ServeMux) {
 		m.guard.Require(authz.RoleOperator, httpx.Wrap(m.log, m.handleGet)))
 	mux.Handle("DELETE /v1/targets/{id}",
 		m.guard.Require(authz.RoleOperator, httpx.Wrap(m.log, m.handleDelete)))
+	mux.Handle("POST /v1/targets/{id}/host-key",
+		m.guard.Require(authz.RoleOperator, httpx.Wrap(m.log, m.handleTrust)))
 }

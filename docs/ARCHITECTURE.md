@@ -182,8 +182,9 @@ of them failing ends the session:
 ```
 1. which identity does this public key belong to?      Identities.ByPublicKey
 2. which target does "principal:target" name?          TargetLookup
-3. is that within policy?                              Policies.Authorize
-4. is it approved right now?                           Grants.HasGrant
+3. is that target's host key pinned?                   Target.HostKey
+4. is that within policy?                              Policies.Authorize
+5. is it approved right now?                           Grants.HasGrant
 ```
 
 Only the first runs during the SSH handshake. The rest run when the session channel opens, so a

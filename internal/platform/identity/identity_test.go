@@ -17,6 +17,7 @@ import (
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 	"github.com/marstack-labs/marstack-access/internal/kernel/logging"
+	"github.com/marstack-labs/marstack-access/internal/kernel/sshkey"
 	"github.com/marstack-labs/marstack-access/internal/store"
 )
 
@@ -514,7 +515,7 @@ func TestAStrongRSAKeyIsAccepted(t *testing.T) {
 	m, _ := newTestModule(t)
 	u := mustCreateUser(t, m, "alice", authz.RoleOperator)
 
-	strong, err := rsa.GenerateKey(rand.Reader, minRSABits)
+	strong, err := rsa.GenerateKey(rand.Reader, sshkey.MinRSABits)
 	if err != nil {
 		t.Fatalf("generate rsa: %v", err)
 	}

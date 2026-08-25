@@ -161,6 +161,7 @@ func TestEveryRouteExceptHealthzRequiresTheToken(t *testing.T) {
 		{http.MethodPost, "/v1/users/usr-abc/keys"},
 		{http.MethodGet, "/v1/users/usr-abc/keys"},
 		{http.MethodDelete, "/v1/keys/key-abc"},
+		{http.MethodPost, "/v1/targets/tgt-abc/host-key"},
 	}
 
 	for _, route := range protected {

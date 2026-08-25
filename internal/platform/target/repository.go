@@ -53,12 +53,14 @@ func (r *repository) get(ctx context.Context, id string) (Target, error) {
 		createdAt string
 	)
 
+	var hostKey sql.NullString
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, name, address, port, created_at FROM targets WHERE id = ?`, id,
-	).Scan(&t.ID, &t.Name, &t.Address, &t.Port, &createdAt)
+		`SELECT id, name, address, port, host_key, created_at FROM targets WHERE id = ?`, id,
+	).Scan(&t.ID, &t.Name, &t.Address, &t.Port, &hostKey, &createdAt)
 	if err != nil {
 		return Target{}, err
 	}
+	t.HostKey = hostKey.String
 
 	t.CreatedAt, err = time.Parse(time.RFC3339, createdAt)
 	if err != nil {
@@ -74,7 +76,7 @@ func (r *repository) get(ctx context.Context, id string) (Target, error) {
 
 func (r *repository) list(ctx context.Context) ([]Target, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, name, address, port, created_at FROM targets ORDER BY name`)
+		`SELECT id, name, address, port, host_key, created_at FROM targets ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list targets: %w", err)
 	}
@@ -84,11 +86,13 @@ func (r *repository) list(ctx context.Context) ([]Target, error) {
 	for rows.Next() {
 		var (
 			t         Target
+			hostKey   sql.NullString
 			createdAt string
 		)
-		if err := rows.Scan(&t.ID, &t.Name, &t.Address, &t.Port, &createdAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.Address, &t.Port, &hostKey, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan target: %w", err)
 		}
+		t.HostKey = hostKey.String
 		t.CreatedAt, err = time.Parse(time.RFC3339, createdAt)
 		if err != nil {
 			return nil, fmt.Errorf("parse created_at: %w", err)
@@ -148,12 +152,14 @@ func (r *repository) getByName(ctx context.Context, name string) (Target, error)
 		createdAt string
 	)
 
+	var hostKey sql.NullString
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, name, address, port, created_at FROM targets WHERE name = ?`, name,
-	).Scan(&t.ID, &t.Name, &t.Address, &t.Port, &createdAt)
+		`SELECT id, name, address, port, host_key, created_at FROM targets WHERE name = ?`, name,
+	).Scan(&t.ID, &t.Name, &t.Address, &t.Port, &hostKey, &createdAt)
 	if err != nil {
 		return Target{}, err
 	}
+	t.HostKey = hostKey.String
 
 	t.CreatedAt, err = time.Parse(time.RFC3339, createdAt)
 	if err != nil {
@@ -165,4 +171,30 @@ func (r *repository) getByName(ctx context.Context, name string) (Target, error)
 		return Target{}, err
 	}
 	return t, nil
+}
+
+func (r *repository) pinHostKey(ctx context.Context, id, hostKey string, replace bool) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var existing sql.NullString
+	if err := tx.QueryRowContext(ctx,
+		`SELECT host_key FROM targets WHERE id = ?`, id,
+	).Scan(&existing); err != nil {
+		return err
+	}
+	if existing.Valid && existing.String != "" && !replace {
+		return errAlreadyPinned
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE targets SET host_key = ? WHERE id = ?`, hostKey, id,
+	); err != nil {
+		return fmt.Errorf("pin host key: %w", err)
+	}
+
+	return tx.Commit()
 }

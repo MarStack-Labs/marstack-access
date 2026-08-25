@@ -10,6 +10,7 @@ import (
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 	"github.com/marstack-labs/marstack-access/internal/kernel/ids"
+	"github.com/marstack-labs/marstack-access/internal/kernel/sshkey"
 	"github.com/marstack-labs/marstack-access/internal/kernel/validate"
 )
 
@@ -221,7 +222,7 @@ func (s *service) addKey(ctx context.Context, userID string, in AddKeyInput) (Ke
 		return Key{}, err
 	}
 
-	parsed, err := parsePublicKey(in.PublicKey)
+	parsed, err := sshkey.Parse(in.PublicKey)
 	if err != nil {
 		return Key{}, err
 	}

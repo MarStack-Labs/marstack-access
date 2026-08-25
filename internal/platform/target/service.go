@@ -10,6 +10,7 @@ import (
 
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 	"github.com/marstack-labs/marstack-access/internal/kernel/ids"
+	"github.com/marstack-labs/marstack-access/internal/kernel/sshkey"
 	"github.com/marstack-labs/marstack-access/internal/kernel/validate"
 )
 
@@ -93,13 +94,26 @@ func (s *service) get(ctx context.Context, id string) (Target, error) {
 	case err != nil:
 		return Target{}, fault.Internal(err)
 	}
-	return t, nil
+	return withFingerprint(t), nil
+}
+
+func withFingerprint(t Target) Target {
+	if t.HostKey == "" {
+		return t
+	}
+	if key, err := sshkey.Parse(t.HostKey); err == nil {
+		t.Fingerprint = key.Fingerprint
+	}
+	return t
 }
 
 func (s *service) list(ctx context.Context) ([]Target, error) {
 	targets, err := s.repo.list(ctx)
 	if err != nil {
 		return nil, fault.Internal(err)
+	}
+	for i := range targets {
+		targets[i] = withFingerprint(targets[i])
 	}
 	return targets, nil
 }
@@ -128,6 +142,27 @@ func (s *service) checkID(id string) error {
 
 func notFound() error {
 	return fault.NotFound("target_not_found", "no target with that id is registered")
+}
+
+func (s *service) trust(ctx context.Context, id string, in TrustInput) (Target, error) {
+	if _, err := s.get(ctx, id); err != nil {
+		return Target{}, err
+	}
+
+	key, err := sshkey.ParseHostKey(in.HostKey)
+	if err != nil {
+		return Target{}, err
+	}
+
+	switch err := s.repo.pinHostKey(ctx, id, key.Authorized, in.Replace); {
+	case errors.Is(err, errAlreadyPinned):
+		return Target{}, fault.Conflict("host_key_pinned",
+			"this target already has a pinned host key; replacing one is how a man-in-the-middle is made permanent, so it has to be asked for")
+	case err != nil:
+		return Target{}, fault.Internal(err)
+	}
+
+	return s.get(ctx, id)
 }
 
 func (s *service) getByName(ctx context.Context, name string) (Target, error) {

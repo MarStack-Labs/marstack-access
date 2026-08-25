@@ -110,6 +110,11 @@ func (s *Server) resolve(ctx context.Context, id authz.Identity, user string) (r
 			fmt.Sprintf("target %q does not accept the principal %q", target.Name, dest.principal))
 	}
 
+	if target.HostKey == "" {
+		return resolved{}, fault.Forbidden("host_key_not_pinned",
+			fmt.Sprintf("target %q has no pinned host key, so its identity cannot be verified", target.Name))
+	}
+
 	if err := s.policies.Authorize(ctx, id, target.ID, dest.principal); err != nil {
 		return resolved{}, err
 	}

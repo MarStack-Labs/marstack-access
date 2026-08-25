@@ -139,6 +139,7 @@ func targetLookup(targets *target.Module) sshd.TargetLookup {
 			Address:    t.Address,
 			Port:       t.Port,
 			Principals: t.Principals,
+			HostKey:    t.HostKey,
 		}, nil
 	}
 }

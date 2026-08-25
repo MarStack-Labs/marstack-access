@@ -118,6 +118,21 @@ marac target delete tgt-xxxxxxxxxxxxx
 `--port` defaults to 22 and is omitted from the request when unset, so the platform owns the
 default rather than the client. There is no update command yet — delete and re-register.
 
+A registered target is reachable by nobody until its host key is pinned. Pipe it in, usually from
+`ssh-keyscan`:
+
+```sh
+ssh-keyscan -t ed25519 10.0.0.4 | marac target trust --target tgt-xxxxxxxxxxxxx
+```
+
+The fingerprint then shows in `marac target list`, and an unpinned target shows `-`. Replacing a pin
+needs `--replace`: a silent replacement is how a man-in-the-middle becomes permanent. Re-pinning the
+same key is a conflict too, because a caller that cannot tell "already correct" from "silently
+changed" cannot act on either.
+
+Use `-t` when scanning. Without it `ssh-keyscan` emits one line per algorithm, and the platform
+refuses an ambiguous scan rather than pinning whichever came first.
+
 Registering a target does not grant anyone access to it. A policy binds a subject — a user or a role
 — to one target and an explicit set of accounts:
 

@@ -14,13 +14,19 @@ type registerRequest struct {
 	Principals []string `json:"principals"`
 }
 
+type trustRequest struct {
+	HostKey string `json:"host_key"`
+	Replace bool   `json:"replace"`
+}
+
 type targetView struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Address    string   `json:"address"`
-	Port       int      `json:"port"`
-	Principals []string `json:"principals"`
-	CreatedAt  string   `json:"created_at"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Address     string   `json:"address"`
+	Port        int      `json:"port"`
+	Principals  []string `json:"principals"`
+	Fingerprint string   `json:"host_key_fingerprint,omitempty"`
+	CreatedAt   string   `json:"created_at"`
 }
 
 type targetListView struct {
@@ -29,12 +35,13 @@ type targetListView struct {
 
 func viewOf(t Target) targetView {
 	return targetView{
-		ID:         t.ID,
-		Name:       t.Name,
-		Address:    t.Address,
-		Port:       t.Port,
-		Principals: t.Principals,
-		CreatedAt:  t.CreatedAt.UTC().Format(time.RFC3339),
+		ID:          t.ID,
+		Name:        t.Name,
+		Address:     t.Address,
+		Port:        t.Port,
+		Principals:  t.Principals,
+		Fingerprint: t.Fingerprint,
+		CreatedAt:   t.CreatedAt.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -84,5 +91,20 @@ func (m *Module) handleDelete(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	httpx.Write(w, http.StatusNoContent, nil)
+	return nil
+}
+
+func (m *Module) handleTrust(w http.ResponseWriter, r *http.Request) error {
+	req, err := httpx.Decode[trustRequest](w, r)
+	if err != nil {
+		return err
+	}
+
+	t, err := m.service.trust(r.Context(), r.PathValue("id"), TrustInput(req))
+	if err != nil {
+		return err
+	}
+
+	httpx.Write(w, http.StatusOK, viewOf(t))
 	return nil
 }
