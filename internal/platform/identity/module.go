@@ -6,17 +6,25 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
+	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
 	"github.com/marstack-labs/marstack-access/internal/store"
 )
 
+type Guard interface {
+	Require(role string, next http.Handler) http.Handler
+}
+
 type Module struct {
 	service *service
+	guard   Guard
 	log     *slog.Logger
 }
 
-func New(st *store.Store, log *slog.Logger) *Module {
+func New(st *store.Store, log *slog.Logger, guard Guard) *Module {
 	return &Module{
 		service: &service{repo: &repository{db: st.DB()}, now: time.Now},
+		guard:   guard,
 		log:     log,
 	}
 }
@@ -47,12 +55,27 @@ func (m *Module) Migrations() []store.Migration {
 	}
 }
 
-func (m *Module) Routes(*http.ServeMux) {}
+func (m *Module) Routes(mux *http.ServeMux) {
+	mux.Handle("POST /v1/users",
+		m.guard.Require(authz.RoleAdmin, httpx.Wrap(m.log, m.handleCreateUser)))
+	mux.Handle("GET /v1/users",
+		m.guard.Require(authz.RoleAdmin, httpx.Wrap(m.log, m.handleListUsers)))
+	mux.Handle("GET /v1/users/{id}",
+		m.guard.Require(authz.RoleAdmin, httpx.Wrap(m.log, m.handleGetUser)))
+	mux.Handle("DELETE /v1/users/{id}",
+		m.guard.Require(authz.RoleAdmin, httpx.Wrap(m.log, m.handleDeleteUser)))
+	mux.Handle("POST /v1/users/{id}/tokens",
+		m.guard.Require(authz.RoleAdmin, httpx.Wrap(m.log, m.handleIssueToken)))
+	mux.Handle("GET /v1/users/{id}/tokens",
+		m.guard.Require(authz.RoleAdmin, httpx.Wrap(m.log, m.handleListTokens)))
+	mux.Handle("DELETE /v1/tokens/{id}",
+		m.guard.Require(authz.RoleAdmin, httpx.Wrap(m.log, m.handleRevokeToken)))
+}
 
 func (m *Module) Bootstrap(ctx context.Context) (string, error) {
 	return m.service.bootstrap(ctx)
 }
 
-func (m *Module) Authenticate(ctx context.Context, secret string) (Identity, error) {
+func (m *Module) Authenticate(ctx context.Context, secret string) (authz.Identity, error) {
 	return m.service.authenticate(ctx, secret)
 }

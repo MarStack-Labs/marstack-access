@@ -10,9 +10,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/logging"
 	"github.com/marstack-labs/marstack-access/internal/store"
 )
+
+type recordingGuard struct {
+	roles []string
+}
+
+func (g *recordingGuard) Require(role string, next http.Handler) http.Handler {
+	g.roles = append(g.roles, role)
+	return next
+}
 
 func newTestModule(t *testing.T) (*Module, http.Handler) {
 	t.Helper()
@@ -23,7 +33,7 @@ func newTestModule(t *testing.T) (*Module, http.Handler) {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	m := New(st, logging.New("error", io.Discard))
+	m := New(st, logging.New("error", io.Discard), &recordingGuard{})
 	if err := st.Migrate(context.Background(), m.Migrations()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -361,7 +371,7 @@ func TestTargetsSurviveARestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	m := New(st, log)
+	m := New(st, log, &recordingGuard{})
 	if err := st.Migrate(ctx, m.Migrations()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -375,7 +385,7 @@ func TestTargetsSurviveARestart(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer st2.Close()
-	m2 := New(st2, log)
+	m2 := New(st2, log, &recordingGuard{})
 	if err := st2.Migrate(ctx, m2.Migrations()); err != nil {
 		t.Fatalf("re-migrate: %v", err)
 	}
@@ -394,6 +404,27 @@ func TestMigrationsAreOwnedByThisModule(t *testing.T) {
 	for _, migration := range m.Migrations() {
 		if migration.Module != m.Name() {
 			t.Errorf("migration %d is owned by %q, want %q", migration.Index, migration.Module, m.Name())
+		}
+	}
+}
+
+func TestEveryRouteRequiresTheOperatorRole(t *testing.T) {
+	st, err := store.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	guard := &recordingGuard{}
+	New(st, logging.New("error", io.Discard), guard).Routes(http.NewServeMux())
+
+	if len(guard.roles) != 4 {
+		t.Fatalf("%d routes declared a role, want 4: a route that skips the guard is reachable unauthenticated",
+			len(guard.roles))
+	}
+	for _, role := range guard.roles {
+		if role != authz.RoleOperator {
+			t.Errorf("a route requires %q, want %q", role, authz.RoleOperator)
 		}
 	}
 }

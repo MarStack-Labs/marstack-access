@@ -377,3 +377,214 @@ func TestTargetsIsAnAliasForTarget(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestTheTokenFlagBecomesABearerHeader(t *testing.T) {
+	var header string
+
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		header = r.Header.Get("Authorization")
+		writeJSON(t, w, http.StatusOK, targetListView{Targets: []targetView{}})
+	})
+
+	if _, err := run(t, "--endpoint", endpoint, "--token", "mat_sel_ver", "target", "list"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := "Bearer mat_sel_ver"; header != want {
+		t.Fatalf("Authorization = %q, want %q", header, want)
+	}
+}
+
+func TestTheTokenComesFromTheEnvironment(t *testing.T) {
+	t.Setenv(tokenEnvVar, "mat_from_env")
+
+	if got := resolveDefaultToken(); got != "mat_from_env" {
+		t.Fatalf("resolveDefaultToken = %q, want the environment value", got)
+	}
+}
+
+func TestNoTokenSendsNoAuthorizationHeader(t *testing.T) {
+	t.Setenv(tokenEnvVar, "")
+	var present bool
+
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		_, present = r.Header["Authorization"]
+		w.WriteHeader(http.StatusUnauthorized)
+		if _, err := w.Write([]byte(`{"error":{"code":"invalid_token","message":"the token is missing"}}`)); err != nil {
+			t.Errorf("write: %v", err)
+		}
+	})
+
+	_, err := run(t, "--endpoint", endpoint, "target", "list")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if present {
+		t.Error("an empty token still produced an Authorization header, which turns a missing credential into a malformed one")
+	}
+	if !strings.Contains(err.Error(), "invalid_token") {
+		t.Fatalf("error = %q, want the server's code so the cause is unambiguous", err)
+	}
+}
+
+func TestAForbiddenResponseNamesTheRole(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		if _, err := w.Write([]byte(
+			`{"error":{"code":"insufficient_role","message":"this action requires the operator role"}}`)); err != nil {
+			t.Errorf("write: %v", err)
+		}
+	})
+
+	_, err := runAgainst(t, endpoint, "target", "list")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "operator") {
+		t.Fatalf("error = %q, want it to name the missing role", err)
+	}
+}
+
+func TestUserCreateSendsNameAndRole(t *testing.T) {
+	var received map[string]any
+
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/users" {
+			t.Errorf("request = %s %s, want POST /v1/users", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		writeJSON(t, w, http.StatusCreated, userView{
+			ID: "usr-abc", Name: "deployer", Role: "operator", CreatedAt: "2026-08-25T10:00:00Z",
+		})
+	})
+
+	out, err := runAgainst(t, endpoint, "user", "create", "--name", "deployer", "--role", "operator")
+	if err != nil {
+		t.Fatalf("unexpected error: %v (%s)", err, out)
+	}
+	if received["name"] != "deployer" || received["role"] != "operator" {
+		t.Fatalf("received = %v", received)
+	}
+	if !strings.Contains(out, "usr-abc") {
+		t.Fatalf("output does not show the created user: %s", out)
+	}
+}
+
+func TestUserCreateRequiresNameAndRole(t *testing.T) {
+	for label, args := range map[string][]string{
+		"no name": {"--role", "operator"},
+		"no role": {"--name", "deployer"},
+	} {
+		endpoint := fakeControlPlane(t, func(http.ResponseWriter, *http.Request) {
+			t.Errorf("%s: the control plane must not be called", label)
+		})
+		if _, err := runAgainst(t, endpoint, append([]string{"user", "create"}, args...)...); err == nil {
+			t.Errorf("%s: expected an error", label)
+		}
+	}
+}
+
+func TestTokenIssuePrintsTheSecretAndSaysItIsNotShownAgain(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if want := "/v1/users/usr-abc/tokens"; r.URL.Path != want {
+			t.Errorf("path = %q, want %q", r.URL.Path, want)
+		}
+		writeJSON(t, w, http.StatusCreated, issuedTokenView{
+			tokenView: tokenView{ID: "tok-abc", UserID: "usr-abc", Selector: "sel"},
+			Secret:    "mat_sel_verifier",
+		})
+	})
+
+	out, err := runAgainst(t, endpoint, "token", "issue", "--user", "usr-abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "mat_sel_verifier") {
+		t.Fatalf("the secret was not printed: %s", out)
+	}
+	if !strings.Contains(out, "not shown again") {
+		t.Fatalf("output does not warn that the secret is unrecoverable: %s", out)
+	}
+}
+
+func TestTokenIssueSendsTheTTLOnlyWhenGiven(t *testing.T) {
+	var received map[string]any
+
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		writeJSON(t, w, http.StatusCreated, issuedTokenView{
+			tokenView: tokenView{ID: "tok-abc"}, Secret: "mat_a_b",
+		})
+	})
+
+	if _, err := runAgainst(t, endpoint, "token", "issue", "--user", "usr-abc"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, present := received["ttl"]; present {
+		t.Error("ttl was sent without the flag, so the server default is bypassed")
+	}
+
+	if _, err := runAgainst(t, endpoint, "token", "issue", "--user", "usr-abc", "--ttl", "24h"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if received["ttl"] != "24h" {
+		t.Fatalf("ttl = %v, want 24h", received["ttl"])
+	}
+}
+
+func TestTokenListShowsNoSecretColumn(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, tokenListView{Tokens: []tokenView{
+			{ID: "tok-abc", UserID: "usr-abc", Selector: "sel", CreatedAt: "2026-08-25T10:00:00Z"},
+		}})
+	})
+
+	out, err := runAgainst(t, endpoint, "token", "list", "--user", "usr-abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, unwanted := range []string{"SECRET", "mat_"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("the listing shows %q: %s", unwanted, out)
+		}
+	}
+	if !strings.Contains(out, "tok-abc") || !strings.Contains(out, "sel") {
+		t.Fatalf("the listing is missing the token id or selector: %s", out)
+	}
+}
+
+func TestATokenWithNoExpiryRendersAPlaceholder(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, tokenListView{Tokens: []tokenView{
+			{ID: "tok-abc", UserID: "usr-abc", Selector: "sel", CreatedAt: "2026-08-25T10:00:00Z"},
+		}})
+	})
+
+	out, err := runAgainst(t, endpoint, "token", "list", "--user", "usr-abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "EXPIRES") || !strings.Contains(out, "-") {
+		t.Fatalf("output = %q, want an EXPIRES column with a placeholder", out)
+	}
+}
+
+func TestTokenRevokeConfirms(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/tokens/tok-abc" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	out, err := runAgainst(t, endpoint, "token", "revoke", "tok-abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "revoked tok-abc") {
+		t.Fatalf("output = %q, want a revocation confirmation", out)
+	}
+}

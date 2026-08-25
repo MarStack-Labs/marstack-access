@@ -69,7 +69,7 @@ func newTargetRegisterCmd(g *globals) *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			var created targetView
-			if err := newClient(g.endpoint).do(
+			if err := newClient(g).do(
 				cmd.Context(), "POST", "/v1/targets", req, &created,
 			); err != nil {
 				return err
@@ -98,7 +98,7 @@ func newTargetListCmd(g *globals) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			var list targetListView
-			if err := newClient(g.endpoint).do(
+			if err := newClient(g).do(
 				cmd.Context(), "GET", "/v1/targets", nil, &list,
 			); err != nil {
 				return err
@@ -120,7 +120,7 @@ func newTargetGetCmd(g *globals) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var t targetView
-			if err := newClient(g.endpoint).do(
+			if err := newClient(g).do(
 				cmd.Context(), "GET", "/v1/targets/"+args[0], nil, &t,
 			); err != nil {
 				return err
@@ -136,7 +136,7 @@ func newTargetDeleteCmd(g *globals) *cobra.Command {
 		Short: "Remove a target from the inventory",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := newClient(g.endpoint).do(
+			if err := newClient(g).do(
 				cmd.Context(), "DELETE", "/v1/targets/"+args[0], nil, nil,
 			); err != nil {
 				return err

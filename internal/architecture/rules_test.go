@@ -1,6 +1,7 @@
 package architecture
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
@@ -167,6 +168,85 @@ func TestCommandOnlyWiresTheCLI(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestEveryPlatformRouteDeclaresWhoMayCallIt(t *testing.T) {
+	root := repoRoot(t)
+	fset := token.NewFileSet()
+	checked := 0
+
+	err := filepath.WalkDir(filepath.Join(root, "internal", "platform"),
+		func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+
+			parsed, parseErr := parser.ParseFile(fset, path, nil, 0)
+			if parseErr != nil {
+				return parseErr
+			}
+			rel, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				return relErr
+			}
+
+			ast.Inspect(parsed, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok || !isMuxHandle(call) || len(call.Args) < 2 {
+					return true
+				}
+
+				checked++
+				if guardOf(call.Args[1]) == "" {
+					t.Errorf("%s:%d registers a route whose handler is not wrapped in Require or Public. "+
+						"An endpoint is unreachable until it declares who may call it, and silence is not a declaration",
+						filepath.ToSlash(rel), fset.Position(call.Pos()).Line)
+				}
+				return true
+			})
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("walk platform: %v", err)
+	}
+
+	if checked == 0 {
+		t.Fatal("no route registrations were found, so this rule proves nothing")
+	}
+}
+
+func isMuxHandle(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Handle" {
+		return false
+	}
+	receiver, ok := sel.X.(*ast.Ident)
+	return ok && receiver.Name == "mux"
+}
+
+func guardOf(arg ast.Expr) string {
+	found := ""
+
+	ast.Inspect(arg, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if sel.Sel.Name == "Require" || sel.Sel.Name == "Public" {
+			found = sel.Sel.Name
+			return false
+		}
+		return true
+	})
+
+	return found
 }
 
 func TestRandomnessIsAlwaysCryptographic(t *testing.T) {

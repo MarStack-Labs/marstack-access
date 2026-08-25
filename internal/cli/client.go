@@ -14,6 +14,7 @@ import (
 const (
 	defaultEndpoint = "http://127.0.0.1:7443"
 	endpointEnvVar  = "MARAC_ENDPOINT"
+	tokenEnvVar     = "MARAC_TOKEN"
 	requestTimeout  = 30 * time.Second
 	maxErrorBody    = 1 << 16
 	maxResponseBody = 1 << 22
@@ -21,12 +22,14 @@ const (
 
 type client struct {
 	endpoint string
+	token    string
 	http     *http.Client
 }
 
-func newClient(endpoint string) *client {
+func newClient(g *globals) *client {
 	return &client{
-		endpoint: strings.TrimRight(endpoint, "/"),
+		endpoint: strings.TrimRight(g.endpoint, "/"),
+		token:    g.token,
 		http:     &http.Client{Timeout: requestTimeout},
 	}
 }
@@ -62,6 +65,9 @@ func (c *client) do(ctx context.Context, method, path string, in, out any) error
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
 
 	res, err := c.http.Do(req)
 	if err != nil {

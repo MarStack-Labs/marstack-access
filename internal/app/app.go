@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
 	"github.com/marstack-labs/marstack-access/internal/platform/identity"
 	"github.com/marstack-labs/marstack-access/internal/platform/system"
@@ -66,10 +67,18 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	}
 
 	a := &App{cfg: cfg, log: log, store: st}
+
+	var idm *identity.Module
+	guard := authz.New(authz.AuthenticatorFunc(
+		func(ctx context.Context, secret string) (authz.Identity, error) {
+			return idm.Authenticate(ctx, secret)
+		}), log)
+	idm = identity.New(st, log, guard)
+
 	a.modules = []Module{
-		system.New(st, log),
-		identity.New(st, log),
-		target.New(st, log),
+		system.New(st, log, guard),
+		idm,
+		target.New(st, log, guard),
 	}
 
 	if err := a.migrate(ctx); err != nil {

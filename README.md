@@ -62,16 +62,38 @@ binds loopback rather than every interface on purpose — exposing it is a deplo
 default.
 
 On the first start against an empty store it creates an `admin` user and writes that account's token
-to `./data/bootstrap-token` with mode `0600`. The log names the path, never the secret. Read it, then
-delete the file:
+to `./data/bootstrap-token` with mode `0600`. The log names the path, never the secret. A restart
+does not issue a second one.
 
 ```sh
-cat data/bootstrap-token
+export MARAC_TOKEN=$(cat data/bootstrap-token)
 rm data/bootstrap-token
 ```
 
-A restart does not issue a second one. Nothing consumes the token yet — the authentication
-middleware lands with the identity endpoints.
+Every route except `GET /healthz` needs a token. Roles are ranked, and a check means *at least*:
+
+| Route | Requires |
+|---|---|
+| `GET /healthz` | nothing — a load balancer probe carries no credential |
+| `GET /v1/version` | `viewer` |
+| `marac target …` | `operator` |
+| `marac user …`, `marac token …` | `admin` |
+
+Create a working account rather than using the bootstrap admin for daily work:
+
+```sh
+marac user create --name deployer --role operator
+marac token issue --user usr-xxxxxxxxxxxxx --ttl 720h
+```
+
+The secret prints once. Nothing stores it, so losing it means issuing another. To take an account
+out of service:
+
+```sh
+marac token list --user usr-xxxxxxxxxxxxx     # metadata only, never secrets
+marac token revoke tok-xxxxxxxxxxxxx          # effective on the next request
+marac user delete usr-xxxxxxxxxxxxx           # also revokes every token it holds
+```
 
 ```sh
 curl -s localhost:7443/healthz

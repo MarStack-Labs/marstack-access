@@ -8,6 +8,7 @@ import (
 
 type globals struct {
 	endpoint string
+	token    string
 	output   string
 }
 
@@ -16,6 +17,10 @@ func resolveDefaultEndpoint() string {
 		return v
 	}
 	return defaultEndpoint
+}
+
+func resolveDefaultToken() string {
+	return os.Getenv(tokenEnvVar)
 }
 
 func newRootCmd() *cobra.Command {
@@ -32,6 +37,8 @@ func newRootCmd() *cobra.Command {
 
 	root.PersistentFlags().StringVar(&g.endpoint, "endpoint", resolveDefaultEndpoint(),
 		"control plane endpoint, overrides "+endpointEnvVar)
+	root.PersistentFlags().StringVar(&g.token, "token", resolveDefaultToken(),
+		"API token, overrides "+tokenEnvVar)
 	root.PersistentFlags().StringVarP(&g.output, "output", "o", outputTable,
 		"output format: table, json")
 
@@ -39,6 +46,8 @@ func newRootCmd() *cobra.Command {
 		newVersionCmd(),
 		newServerCmd(),
 		newTargetCmd(g),
+		newUserCmd(g),
+		newTokenCmd(g),
 	)
 	return root
 }

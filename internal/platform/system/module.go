@@ -4,19 +4,25 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
 	"github.com/marstack-labs/marstack-access/internal/store"
 	"github.com/marstack-labs/marstack-access/internal/version"
 )
 
+type Guard interface {
+	Require(role string, next http.Handler) http.Handler
+}
+
 type Module struct {
 	store *store.Store
+	guard Guard
 	log   *slog.Logger
 }
 
-func New(st *store.Store, log *slog.Logger) *Module {
-	return &Module{store: st, log: log}
+func New(st *store.Store, log *slog.Logger, guard Guard) *Module {
+	return &Module{store: st, guard: guard, log: log}
 }
 
 func (m *Module) Name() string {
@@ -28,8 +34,10 @@ func (m *Module) Migrations() []store.Migration {
 }
 
 func (m *Module) Routes(mux *http.ServeMux) {
-	mux.Handle("GET /healthz", httpx.Wrap(m.log, m.handleHealthz))
-	mux.Handle("GET /v1/version", httpx.Wrap(m.log, m.handleVersion))
+	mux.Handle("GET /healthz",
+		authz.Public(httpx.Wrap(m.log, m.handleHealthz)))
+	mux.Handle("GET /v1/version",
+		m.guard.Require(authz.RoleViewer, httpx.Wrap(m.log, m.handleVersion)))
 }
 
 func (m *Module) handleHealthz(w http.ResponseWriter, r *http.Request) error {

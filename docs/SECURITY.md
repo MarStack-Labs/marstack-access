@@ -128,6 +128,38 @@ token pasted into this repository fails the commit. The rule was verified agains
 running binary actually issued, because a scanner rule that matches nothing is worse than no rule —
 it reports success.
 
+## Authorization
+
+Roles are `viewer`, `operator`, `admin`, ranked in that order, and a check means *at least*. An
+unrecognised or empty role satisfies nothing — a row whose role column is blank cannot pass the
+lowest bar.
+
+**A route that declares no policy fails the build.** Invariant 1 is enforced structurally: every
+route in a platform module is wrapped in `Require(role, …)` or `authz.Public(…)`, and an
+architecture test parses the AST of every module to prove it. `Public` is a runtime no-op whose only
+job is to make "anyone may call this" a written decision. The gap this closes is the one that
+matters — a new endpoint added in a hurry is unreachable-by-default rather than open-by-default.
+
+**401 and 403 are deliberately distinguishable.** Uniformity applies to *token validity*, where any
+signal helps a guesser. It does not apply to authorization: a caller who has proved who they are
+learns nothing dangerous from being told which role they lack, and telling them saves a support
+round trip. The 403 body names the required role and never echoes back the caller's own name, id, or
+role.
+
+**An authenticator that fails denies.** If the store is unreachable, `Require` returns a 500 and the
+handler never runs. There is no code path where an error in authentication falls through to the
+protected handler.
+
+**`Require` panics at wiring time on an unknown role.** A typo in a route's role would otherwise
+produce an endpoint satisfied by nobody, which reads as a permissions bug rather than a typo and
+could sit unnoticed for a long time. Failing at startup makes it a two-second fix.
+
+**The current split is operator for targets, admin for identity.** Registering a target expands what
+the platform can reach, so it sits at `operator`. Deleting one only removes a record and makes the
+target unreachable *through the platform*, which fails safe, so it needs no higher bar than
+registration. Creating users and issuing tokens is `admin`, because an operator who could do it
+could mint itself an admin.
+
 ## Bootstrap
 
 On a store with no users, the first start creates an `admin` user, issues it a token, and writes the

@@ -9,15 +9,9 @@ const (
 	userIDPrefix  = "usr"
 	tokenIDPrefix = "tok"
 
-	RoleAdmin    = "admin"
-	RoleOperator = "operator"
-	RoleViewer   = "viewer"
-
 	bootstrapUserName = "admin"
 	maxTokenTTL       = 365 * 24 * time.Hour
 )
-
-var roles = []string{RoleAdmin, RoleOperator, RoleViewer}
 
 var (
 	errNameTaken     = errors.New("user name already registered")
@@ -42,13 +36,6 @@ type Token struct {
 
 func (t Token) expired(now time.Time) bool {
 	return !t.ExpiresAt.IsZero() && !now.Before(t.ExpiresAt)
-}
-
-type Identity struct {
-	UserID  string
-	Name    string
-	Role    string
-	TokenID string
 }
 
 type CreateUserInput struct {

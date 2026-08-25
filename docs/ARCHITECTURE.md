@@ -164,17 +164,66 @@ Modules are added one at a time, each with its own migrations and routes:
 ```
 system      health, version                                        done
 target      the SSH target inventory                               done
-identity    users, roles, API tokens                               storage done, no routes yet
+identity    users, roles, API tokens                               done
 policy      who may reach which target as which principal
 approval    JIT request, approve, time-boxed grant
 session     the live session record and the kill switch
 audit       the append-only event trail and the recording index
 ```
 
-`identity` deliberately registers no HTTP routes yet. Invariant 1 in
-[`SECURITY.md`](SECURITY.md) says an endpoint is unreachable until it declares who may call it, and
-the authorization middleware does not exist. Exposing `POST /v1/users` before it would mean anyone
-who can reach the port can create an admin. The routes and the middleware land together.
+## Authorization
+
+`kernel/authz` owns the role vocabulary, the request-scoped identity, and the guard that turns a
+bearer token into one. It is a kernel package rather than part of `identity` because two platform
+modules need it, and modules may not import each other.
+
+`identity` stores users and tokens and implements the one method the guard needs:
+
+```go
+type Authenticator interface {
+	Authenticate(ctx context.Context, secret string) (Identity, error)
+}
+```
+
+Roles are ranked, and `Require` means *at least*: `admin` satisfies an `operator` check. An
+unrecognised role satisfies nothing, so a blank role column cannot pass the lowest bar.
+
+### A route declares who may call it, and silence is not a declaration
+
+Every route in a platform module is wrapped in either `guard.Require(role, …)` or `authz.Public(…)`.
+`Public` is a no-op at runtime; it exists so that "anyone may call this" is a decision written in
+the source rather than the absence of one.
+
+`TestEveryPlatformRouteDeclaresWhoMayCallIt` parses each module's AST, finds every `mux.Handle`
+call, and fails if the handler argument contains neither wrapper. A route added without a policy
+does not merely go unnoticed — it fails the build.
+
+Current policy:
+
+| Route | Requires |
+|---|---|
+| `GET /healthz` | public, so a load balancer probe needs no credential |
+| `GET /v1/version` | `viewer` |
+| `/v1/targets…` | `operator` |
+| `/v1/users…`, `/v1/tokens…` | `admin` |
+
+### The construction cycle is explicit
+
+The guard needs `identity` to authenticate, and `identity`'s routes need the guard. That cycle is
+real, and it is resolved in the composition root with a closure rather than with a setter, so no
+module is ever constructed in a half-usable state:
+
+```go
+var idm *identity.Module
+guard := authz.New(authz.AuthenticatorFunc(
+	func(ctx context.Context, secret string) (authz.Identity, error) {
+		return idm.Authenticate(ctx, secret)
+	}), log)
+idm = identity.New(st, log, guard)
+```
+
+The closure captures the variable, not its value, and by the time a request arrives `idm` is set.
+The cycle stays visible in `app`, which is where wiring decisions belong.
 
 ## Bootstrap and optional module capabilities
 

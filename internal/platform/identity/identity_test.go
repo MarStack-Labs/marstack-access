@@ -3,14 +3,22 @@ package identity
 import (
 	"context"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 	"github.com/marstack-labs/marstack-access/internal/kernel/logging"
 	"github.com/marstack-labs/marstack-access/internal/store"
 )
+
+type passThroughGuard struct{}
+
+func (passThroughGuard) Require(_ string, next http.Handler) http.Handler {
+	return next
+}
 
 type clock struct {
 	at time.Time
@@ -29,7 +37,7 @@ func newTestModule(t *testing.T) (*Module, *clock) {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	m := New(st, logging.New("error", io.Discard))
+	m := New(st, logging.New("error", io.Discard), passThroughGuard{})
 	if err := st.Migrate(context.Background(), m.Migrations()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -73,8 +81,8 @@ func TestCreateUserValidatesNameAndRole(t *testing.T) {
 	ctx := context.Background()
 
 	cases := map[string]CreateUserInput{
-		"empty name":   {Name: "", Role: RoleAdmin},
-		"bad name":     {Name: "Umar Sabirin", Role: RoleAdmin},
+		"empty name":   {Name: "", Role: authz.RoleAdmin},
+		"bad name":     {Name: "Umar Sabirin", Role: authz.RoleAdmin},
 		"empty role":   {Name: "umar", Role: ""},
 		"unknown role": {Name: "umar", Role: "superadmin"},
 		"role casing":  {Name: "umar", Role: "Admin"},
@@ -91,9 +99,9 @@ func TestCreateUserValidatesNameAndRole(t *testing.T) {
 
 func TestCreateUserRejectsADuplicateName(t *testing.T) {
 	m, _ := newTestModule(t)
-	mustCreateUser(t, m, "umar", RoleAdmin)
+	mustCreateUser(t, m, "umar", authz.RoleAdmin)
 
-	_, err := m.service.createUser(context.Background(), CreateUserInput{Name: "umar", Role: RoleViewer})
+	_, err := m.service.createUser(context.Background(), CreateUserInput{Name: "umar", Role: authz.RoleViewer})
 	if got := faultOf(t, err); got.Kind != fault.KindConflict || got.Code != "user_name_taken" {
 		t.Fatalf("fault = %+v, want a user_name_taken conflict", got)
 	}
@@ -101,7 +109,7 @@ func TestCreateUserRejectsADuplicateName(t *testing.T) {
 
 func TestAuthenticateAcceptsAFreshToken(t *testing.T) {
 	m, _ := newTestModule(t)
-	u := mustCreateUser(t, m, "umar", RoleOperator)
+	u := mustCreateUser(t, m, "umar", authz.RoleOperator)
 	tok, secret := mustIssueToken(t, m, u.ID, 0)
 
 	id, err := m.Authenticate(context.Background(), secret)
@@ -109,7 +117,7 @@ func TestAuthenticateAcceptsAFreshToken(t *testing.T) {
 		t.Fatalf("authenticate: %v", err)
 	}
 
-	if id.UserID != u.ID || id.Name != "umar" || id.Role != RoleOperator || id.TokenID != tok.ID {
+	if id.UserID != u.ID || id.Name != "umar" || id.Role != authz.RoleOperator || id.TokenID != tok.ID {
 		t.Fatalf("identity = %+v, want it to name the user and the token used", id)
 	}
 }
@@ -120,7 +128,7 @@ func TestEveryAuthenticationFailureLooksTheSame(t *testing.T) {
 	build := func(t *testing.T) (*Module, *clock, string) {
 		t.Helper()
 		m, c := newTestModule(t)
-		u := mustCreateUser(t, m, "umar", RoleOperator)
+		u := mustCreateUser(t, m, "umar", authz.RoleOperator)
 		_, secret := mustIssueToken(t, m, u.ID, time.Hour)
 		return m, c, secret
 	}
@@ -174,7 +182,7 @@ func TestEveryAuthenticationFailureLooksTheSame(t *testing.T) {
 		},
 	}
 
-	want := faultOf(t, invalidToken())
+	want := faultOf(t, authz.InvalidToken())
 
 	for label, setup := range cases {
 		m, secret := setup(t)
@@ -191,7 +199,7 @@ func TestEveryAuthenticationFailureLooksTheSame(t *testing.T) {
 
 func TestAnExpiredTokenIsRejectedExactlyAtExpiry(t *testing.T) {
 	m, c := newTestModule(t)
-	u := mustCreateUser(t, m, "umar", RoleOperator)
+	u := mustCreateUser(t, m, "umar", authz.RoleOperator)
 	_, secret := mustIssueToken(t, m, u.ID, time.Hour)
 	ctx := context.Background()
 
@@ -208,7 +216,7 @@ func TestAnExpiredTokenIsRejectedExactlyAtExpiry(t *testing.T) {
 
 func TestATokenWithNoTTLDoesNotExpire(t *testing.T) {
 	m, c := newTestModule(t)
-	u := mustCreateUser(t, m, "umar", RoleAdmin)
+	u := mustCreateUser(t, m, "umar", authz.RoleAdmin)
 	_, secret := mustIssueToken(t, m, u.ID, 0)
 
 	c.at = c.at.Add(100 * 365 * 24 * time.Hour)
@@ -220,7 +228,7 @@ func TestATokenWithNoTTLDoesNotExpire(t *testing.T) {
 
 func TestIssueTokenRejectsAnAbsurdTTL(t *testing.T) {
 	m, _ := newTestModule(t)
-	u := mustCreateUser(t, m, "umar", RoleAdmin)
+	u := mustCreateUser(t, m, "umar", authz.RoleAdmin)
 
 	for _, ttl := range []time.Duration{-time.Second, maxTokenTTL + time.Second} {
 		if _, _, err := m.service.issueToken(context.Background(), u.ID, ttl); err == nil {
@@ -241,7 +249,7 @@ func TestIssueTokenRejectsAnUnknownUser(t *testing.T) {
 func TestDeletingAUserRevokesItsTokens(t *testing.T) {
 	m, _ := newTestModule(t)
 	ctx := context.Background()
-	u := mustCreateUser(t, m, "umar", RoleAdmin)
+	u := mustCreateUser(t, m, "umar", authz.RoleAdmin)
 	mustIssueToken(t, m, u.ID, 0)
 	mustIssueToken(t, m, u.ID, 0)
 
@@ -260,7 +268,7 @@ func TestDeletingAUserRevokesItsTokens(t *testing.T) {
 
 func TestListTokensNeverExposesTheVerifier(t *testing.T) {
 	m, _ := newTestModule(t)
-	u := mustCreateUser(t, m, "umar", RoleAdmin)
+	u := mustCreateUser(t, m, "umar", authz.RoleAdmin)
 	_, secret := mustIssueToken(t, m, u.ID, 0)
 	parts, _ := parseSecret(secret)
 
@@ -297,7 +305,7 @@ func TestBootstrapCreatesAnAdminOnlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the bootstrap secret does not authenticate: %v", err)
 	}
-	if id.Role != RoleAdmin || id.Name != bootstrapUserName {
+	if id.Role != authz.RoleAdmin || id.Name != bootstrapUserName {
 		t.Fatalf("identity = %+v, want the %s admin", id, bootstrapUserName)
 	}
 
@@ -312,7 +320,7 @@ func TestBootstrapCreatesAnAdminOnlyOnce(t *testing.T) {
 
 func TestBootstrapDoesNotRunWhenAnyUserExists(t *testing.T) {
 	m, _ := newTestModule(t)
-	mustCreateUser(t, m, "umar", RoleViewer)
+	mustCreateUser(t, m, "umar", authz.RoleViewer)
 
 	secret, err := m.Bootstrap(context.Background())
 	if err != nil {
@@ -326,7 +334,7 @@ func TestBootstrapDoesNotRunWhenAnyUserExists(t *testing.T) {
 func TestTwoTokensForTheSameUserBothWork(t *testing.T) {
 	m, _ := newTestModule(t)
 	ctx := context.Background()
-	u := mustCreateUser(t, m, "umar", RoleOperator)
+	u := mustCreateUser(t, m, "umar", authz.RoleOperator)
 
 	_, first := mustIssueToken(t, m, u.ID, 0)
 	_, second := mustIssueToken(t, m, u.ID, 0)
@@ -344,7 +352,7 @@ func TestTwoTokensForTheSameUserBothWork(t *testing.T) {
 func TestRevokingOneTokenLeavesTheOther(t *testing.T) {
 	m, _ := newTestModule(t)
 	ctx := context.Background()
-	u := mustCreateUser(t, m, "umar", RoleOperator)
+	u := mustCreateUser(t, m, "umar", authz.RoleOperator)
 
 	firstToken, first := mustIssueToken(t, m, u.ID, 0)
 	_, second := mustIssueToken(t, m, u.ID, 0)
@@ -371,7 +379,7 @@ func TestRevokeRejectsAMalformedID(t *testing.T) {
 
 func TestIdentityCarriesNoSecretMaterial(t *testing.T) {
 	m, _ := newTestModule(t)
-	u := mustCreateUser(t, m, "umar", RoleAdmin)
+	u := mustCreateUser(t, m, "umar", authz.RoleAdmin)
 	_, secret := mustIssueToken(t, m, u.ID, 0)
 
 	id, err := m.Authenticate(context.Background(), secret)

@@ -5,18 +5,25 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
 	"github.com/marstack-labs/marstack-access/internal/store"
 )
 
+type Guard interface {
+	Require(role string, next http.Handler) http.Handler
+}
+
 type Module struct {
 	service *service
+	guard   Guard
 	log     *slog.Logger
 }
 
-func New(st *store.Store, log *slog.Logger) *Module {
+func New(st *store.Store, log *slog.Logger, guard Guard) *Module {
 	return &Module{
 		service: &service{repo: &repository{db: st.DB()}, now: time.Now},
+		guard:   guard,
 		log:     log,
 	}
 }
@@ -44,8 +51,12 @@ func (m *Module) Migrations() []store.Migration {
 }
 
 func (m *Module) Routes(mux *http.ServeMux) {
-	mux.Handle("POST /v1/targets", httpx.Wrap(m.log, m.handleRegister))
-	mux.Handle("GET /v1/targets", httpx.Wrap(m.log, m.handleList))
-	mux.Handle("GET /v1/targets/{id}", httpx.Wrap(m.log, m.handleGet))
-	mux.Handle("DELETE /v1/targets/{id}", httpx.Wrap(m.log, m.handleDelete))
+	mux.Handle("POST /v1/targets",
+		m.guard.Require(authz.RoleOperator, httpx.Wrap(m.log, m.handleRegister)))
+	mux.Handle("GET /v1/targets",
+		m.guard.Require(authz.RoleOperator, httpx.Wrap(m.log, m.handleList)))
+	mux.Handle("GET /v1/targets/{id}",
+		m.guard.Require(authz.RoleOperator, httpx.Wrap(m.log, m.handleGet)))
+	mux.Handle("DELETE /v1/targets/{id}",
+		m.guard.Require(authz.RoleOperator, httpx.Wrap(m.log, m.handleDelete)))
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 	"github.com/marstack-labs/marstack-access/internal/kernel/ids"
 	"github.com/marstack-labs/marstack-access/internal/kernel/validate"
@@ -23,7 +24,7 @@ func (s *service) createUser(ctx context.Context, in CreateUserInput) (User, err
 	if err := validate.Name("name", in.Name); err != nil {
 		return User{}, err
 	}
-	if err := validate.OneOf("role", in.Role, roles...); err != nil {
+	if err := validate.OneOf("role", in.Role, authz.Roles()...); err != nil {
 		return User{}, err
 	}
 
@@ -155,31 +156,31 @@ func (s *service) revokeToken(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *service) authenticate(ctx context.Context, secret string) (Identity, error) {
+func (s *service) authenticate(ctx context.Context, secret string) (authz.Identity, error) {
 	parts, ok := parseSecret(secret)
 	if !ok {
-		return Identity{}, invalidToken()
+		return authz.Identity{}, authz.InvalidToken()
 	}
 
 	rec, err := s.repo.tokenBySelector(ctx, parts.selector)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return Identity{}, invalidToken()
+		return authz.Identity{}, authz.InvalidToken()
 	case err != nil:
-		return Identity{}, fault.Internal(err)
+		return authz.Identity{}, fault.Internal(err)
 	}
 
 	if !verifierMatches(rec.verifierHash, parts.verifier) {
-		return Identity{}, invalidToken()
+		return authz.Identity{}, authz.InvalidToken()
 	}
 	if rec.expired(s.now()) {
-		return Identity{}, invalidToken()
+		return authz.Identity{}, authz.InvalidToken()
 	}
 	if rec.userDisabled {
-		return Identity{}, invalidToken()
+		return authz.Identity{}, authz.InvalidToken()
 	}
 
-	return Identity{
+	return authz.Identity{
 		UserID:  rec.UserID,
 		Name:    rec.userName,
 		Role:    rec.userRole,
@@ -196,7 +197,7 @@ func (s *service) bootstrap(ctx context.Context) (string, error) {
 		return "", nil
 	}
 
-	u, err := s.createUser(ctx, CreateUserInput{Name: bootstrapUserName, Role: RoleAdmin})
+	u, err := s.createUser(ctx, CreateUserInput{Name: bootstrapUserName, Role: authz.RoleAdmin})
 	if err != nil {
 		return "", err
 	}
@@ -210,8 +211,4 @@ func (s *service) bootstrap(ctx context.Context) (string, error) {
 
 func userNotFound() error {
 	return fault.NotFound("user_not_found", "no user with that id exists")
-}
-
-func invalidToken() error {
-	return fault.Unauthenticated("invalid_token", "the token is missing, malformed, expired, or revoked")
 }
