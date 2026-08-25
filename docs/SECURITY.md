@@ -88,7 +88,7 @@ These hold everywhere. A change that weakens one is a design change, not a refac
 | Recording is mandatory | the recorder is opened before the target is dialed, and a failure to open it refuses the session |
 | Scoped authority | one place builds the certificate request; principal, target, TTL, and source address are all required fields |
 | Certificate stays inside | the mint call returns a connection, not a credential; nothing serialises a certificate to a response |
-| Audit ships out | the audit sink is write-only by construction; no delete method exists |
+| Audit ships out | `kernel/audit` sinks expose `Append` and nothing else, and an architecture test fails the build if one grows a delete, remove, truncate, purge, rotate, prune, or clear method |
 | No secret leakage | `httpx.Wrap` never writes `fault.Unwrap()` to the client |
 | No shell execution | `os/exec` with argument slices; `gosec` flags a shell invocation |
 
@@ -437,6 +437,44 @@ the session is gone when it is not, which is the worst available answer.
 restarts, so an open row at startup is a phantom: it can never be killed and it makes the live list
 lie. `Reconcile` closes them with exit code `-1` and a reason that names the restart, so they are
 not mistaken for clean exits.
+
+## The audit trail
+
+Two layers, because they defend against different things.
+
+**A synchronous append-only file, for durability against a crash.** `Record` writes and `fsync`s
+before returning, and a write failure is returned to the caller so a session that cannot be recorded
+can be refused. The file is opened `O_APPEND` and never truncated, so restarting the gateway adds to
+the trail rather than replacing it.
+
+**An asynchronous push to Loki, for durability against whoever owns the host.** The local file is
+deletable by root on the gateway; that is exactly the adversary invariant 8 is about. Shipping is
+what makes the trail outlive the machine.
+
+**Shipping never fails a session.** A queue full or a Loki that is down logs an error and increments
+a drop counter; the durable write has already happened. Blocking on a log aggregator would let an
+outage stall every session, and dropping the durable write to keep the shipment would be the wrong
+half to sacrifice. `Close` drains the queue so a clean shutdown ships what is in flight.
+
+**Loki labels stay low cardinality.** Only `job`, `action`, and `outcome` are labels. Ids — session,
+actor, target — go in the line. Loki indexes labels, so putting a session id in one creates a stream
+per session and eventually takes the aggregator down. There is a test asserting no other label is
+ever emitted.
+
+**The trail carries what the client was not told.** A refused SSH authentication returns a uniform
+`Permission denied` so nothing can be enumerated, and records the destination, source address, and
+key fingerprint. Those are two halves of one decision: uniform to the stranger, specific to the
+investigator. A trail as uniform as the refusal would hide someone probing host names.
+
+**Retention is not this platform's job.** Sinks can only append. Deciding how long events live
+belongs to whatever stores them, and a process that can shorten its own trail does not have one.
+
+### What is not covered yet
+
+Recordings are still local files. Invariant 8 says recordings go to object storage under an object
+lock, and that half is not built: `./data/recordings` is deletable by root on the gateway. The event
+trail names every recording, so a missing file is detectable from Loki — but detecting is not the
+same as preventing, and this section will say so until the upload exists.
 
 ## Bootstrap
 

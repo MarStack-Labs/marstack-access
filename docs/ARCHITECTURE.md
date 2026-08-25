@@ -174,7 +174,8 @@ identity    users, roles, API tokens                               done
 policy      who may reach which target as which principal          done
 approval    JIT request, approve, time-boxed grant                 done
 session     the live session record and the kill switch                done
-audit       the append-only event trail and the recording index
+audit       the append-only event trail                             done
+            the recording index in object storage
 ```
 
 The data plane lives in `internal/dataplane/sshd`. It answers four questions in order, and any one

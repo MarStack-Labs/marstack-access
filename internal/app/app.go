@@ -14,6 +14,7 @@ import (
 
 	"github.com/marstack-labs/marstack-access/internal/dataplane/certs"
 	"github.com/marstack-labs/marstack-access/internal/dataplane/sshd"
+	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
 	"github.com/marstack-labs/marstack-access/internal/platform/approval"
@@ -39,7 +40,11 @@ type Reconciler interface {
 	Reconcile(ctx context.Context) error
 }
 
-const bootstrapTokenFile = "bootstrap-token"
+const (
+	bootstrapTokenFile = "bootstrap-token"
+	auditDir           = "audit"
+	auditJob           = "marstack-access"
+)
 
 type Config struct {
 	Listen         string
@@ -47,6 +52,7 @@ type Config struct {
 	DataDir        string
 	AdvertiseIP    string
 	DevCAKeyPath   string
+	LokiURL        string
 	RequestTimeout time.Duration
 }
 
@@ -71,6 +77,8 @@ type App struct {
 	router  http.Handler
 	http    *http.Server
 	sshd    *sshd.Server
+	trail   *audit.Recorder
+	sink    *audit.FileSink
 }
 
 func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
@@ -82,6 +90,23 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	}
 
 	a := &App{cfg: cfg, log: log, store: st}
+
+	a.sink, err = audit.OpenFileSink(filepath.Join(cfg.DataDir, auditDir))
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+
+	var shipped audit.Sink
+	if cfg.LokiURL != "" {
+		shipped = audit.NewLokiSink(cfg.LokiURL, auditJob)
+		log.Info("audit events will be shipped", "loki", cfg.LokiURL)
+	} else {
+		log.Warn("no audit shipping configured, the trail stays on this host",
+			"trail", a.sink.Path(),
+			"hint", "--audit-loki-url makes the trail survive whoever owns this host")
+	}
+	a.trail = audit.New(log, a.sink, shipped)
 
 	var idm *identity.Module
 	guard := authz.New(authz.AuthenticatorFunc(
@@ -140,7 +165,7 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 				AdvertiseIP: cfg.AdvertiseIP,
 			},
 			log, idm, targetLookup(targets), policies, grants, signer,
-			sessionOpener(sessions), sessionCloser(sessions))
+			sessionOpener(sessions), sessionCloser(sessions), a.trail)
 		if err != nil {
 			st.Close()
 			return nil, err
@@ -224,6 +249,12 @@ func targetLookup(targets *target.Module) sshd.TargetLookup {
 }
 
 func (a *App) Close() error {
+	if a.trail != nil {
+		_ = a.trail.Close()
+	}
+	if a.sink != nil {
+		_ = a.sink.Close()
+	}
 	return a.store.Close()
 }
 

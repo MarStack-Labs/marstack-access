@@ -983,3 +983,44 @@ func TestReconcileRunsOnEveryStart(t *testing.T) {
 		t.Errorf("the log does not mention the cleanup: %s", logged.String())
 	}
 }
+
+func TestTheAuditTrailIsWrittenLocallyByDefault(t *testing.T) {
+	dir := t.TempDir()
+	var logged bytes.Buffer
+
+	a, err := New(context.Background(), Config{DataDir: dir},
+		slog.New(slog.NewTextHandler(&logged, nil)))
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	a.Close()
+
+	path := filepath.Join(dir, auditDir, "audit.jsonl")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("no audit trail was created: %v", err)
+	}
+	if !strings.Contains(logged.String(), "no audit shipping configured") {
+		t.Errorf("the log does not warn that the trail stays on this host: %s", logged.String())
+	}
+	if !strings.Contains(logged.String(), "survive whoever owns this host") {
+		t.Error("the warning does not say what shipping buys")
+	}
+}
+
+func TestConfiguringLokiIsLogged(t *testing.T) {
+	var logged bytes.Buffer
+
+	a, err := New(context.Background(), Config{DataDir: t.TempDir(), LokiURL: "http://loki:3100"},
+		slog.New(slog.NewTextHandler(&logged, nil)))
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	a.Close()
+
+	if !strings.Contains(logged.String(), "audit events will be shipped") {
+		t.Fatalf("the log does not confirm shipping is on: %s", logged.String())
+	}
+	if strings.Contains(logged.String(), "no audit shipping configured") {
+		t.Error("the log both warns and confirms")
+	}
+}

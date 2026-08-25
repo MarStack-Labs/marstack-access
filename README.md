@@ -22,9 +22,11 @@ This one inverts that.
 - **Agentless.** Nothing is installed on a target. A target opts in with two files in its `sshd`
   configuration, and `sshd` — not our code — enforces the certificate's principal, expiry, and
   source address.
-- **Tamper-evident audit.** Events ship to an append-only sink and recordings to object storage
-  under an object lock. Neither plane holds a delete credential, so owning the gateway does not
-  erase what it already reported.
+- **An audit trail that can only grow.** Every event is written to a local append-only file and
+  shipped to Loki. Nothing in the code can delete, truncate, or rotate a trail — an architecture test
+  fails the build if a sink grows such a method. Recordings are not yet in object storage, so that
+  half of the claim is honest work in progress; [`docs/SECURITY.md`](docs/SECURITY.md) says exactly
+  what is and is not covered.
 - **Greppable sessions.** Recordings are asciicast, not video. "Who ran this command last month" is
   a query, not an afternoon of playback.
 
@@ -261,6 +263,16 @@ marac session list
 marac session get ses-xxxxxxxxxxxxx      # includes where the recording is
 marac session kill ses-xxxxxxxxxxxxx     # admin only
 ```
+
+Every decision lands in the audit trail at `./data/audit/audit.jsonl`, and ships to Loki when asked:
+
+```sh
+marac server --audit-loki-url http://loki:3100
+```
+
+Without that flag the trail stays on the host, which the log warns about — a trail root can delete is
+durable against a crash but not against whoever owns the machine. Shipping never fails a session: if
+Loki is down the event is already on disk and the drop is counted.
 
 A kill that closed nothing says so rather than reporting success — the row may have been opened by a
 run that has since stopped. Rows left open by a crash are closed on the next start with a reason

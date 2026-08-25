@@ -276,6 +276,55 @@ func guardOf(arg ast.Expr) string {
 	return found
 }
 
+func TestNoAuditSinkCanDeleteAnything(t *testing.T) {
+	root := repoRoot(t)
+	fset := token.NewFileSet()
+	forbidden := []string{"Delete", "Remove", "Truncate", "Purge", "Rotate", "Prune", "Clear"}
+	checked := 0
+
+	err := filepath.WalkDir(filepath.Join(root, "internal", "kernel", "audit"),
+		func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+
+			parsed, parseErr := parser.ParseFile(fset, path, nil, 0)
+			if parseErr != nil {
+				return parseErr
+			}
+			rel, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				return relErr
+			}
+			checked++
+
+			for _, decl := range parsed.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok {
+					continue
+				}
+				for _, verb := range forbidden {
+					if strings.Contains(fn.Name.Name, verb) {
+						t.Errorf("%s:%d declares %s. An audit trail this process can shorten is not a trail. "+
+							"Retention belongs to whatever stores the events, not to the thing that writes them",
+							filepath.ToSlash(rel), fset.Position(fn.Pos()).Line, fn.Name.Name)
+					}
+				}
+			}
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("walk audit: %v", err)
+	}
+
+	if checked == 0 {
+		t.Fatal("no audit sources were read, so this rule proves nothing")
+	}
+}
+
 func TestRandomnessIsAlwaysCryptographic(t *testing.T) {
 	for _, f := range loadSources(t) {
 		if f.pkg == selfPkg {

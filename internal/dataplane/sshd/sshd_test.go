@@ -17,6 +17,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/marstack-labs/marstack-access/internal/dataplane/certs"
+	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 	"github.com/marstack-labs/marstack-access/internal/kernel/logging"
@@ -145,11 +146,20 @@ func startServer(t *testing.T, st *stubs) (*Server, string) {
 func startServerWith(t *testing.T, st *stubs, signer certs.Signer, dataDir string) (*Server, string) {
 	t.Helper()
 
+	sink, err := audit.OpenFileSink(filepath.Join(dataDir, "audit"))
+	if err != nil {
+		t.Fatalf("open audit sink: %v", err)
+	}
+	t.Cleanup(func() { sink.Close() })
+	trail := audit.New(logging.New("error", io.Discard), sink, nil)
+	t.Cleanup(func() { trail.Close() })
+
 	srv, err := New(Config{Listen: "127.0.0.1:0", DataDir: dataDir, AdvertiseIP: "127.0.0.1"},
-		logging.New("error", io.Discard), st, st.lookup, st, st, signer, st.Open, st.Close)
+		logging.New("error", io.Discard), st, st.lookup, st, st, signer, st.Open, st.Close, trail)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
+	srv.auditPath = sink.Path()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -392,13 +402,13 @@ func TestTheHostKeyIsStableAcrossRestarts(t *testing.T) {
 	st := newStubs()
 
 	first, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close)
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close, nil)
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
 
 	second, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close)
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close, nil)
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -413,7 +423,7 @@ func TestTheHostKeyIsNotWorldReadable(t *testing.T) {
 	st := newStubs()
 
 	if _, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close); err != nil {
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close, nil); err != nil {
 		t.Fatalf("new: %v", err)
 	}
 
@@ -435,7 +445,7 @@ func TestACorruptHostKeyFailsRatherThanBeingReplaced(t *testing.T) {
 	}
 
 	if _, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close); err == nil {
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close, nil); err == nil {
 		t.Fatal("a corrupt host key was silently replaced. Generating a new one would make every client's stored key wrong at once, which is indistinguishable from an attack")
 	}
 }

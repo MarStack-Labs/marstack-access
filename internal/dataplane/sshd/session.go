@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 	"github.com/marstack-labs/marstack-access/internal/kernel/ids"
@@ -52,6 +54,19 @@ func (s *Server) serveSession(ctx context.Context, conn *ssh.ServerConn, id auth
 		s.log.Warn("ssh session refused",
 			"session", sessionID, "remote", remote, "user", id.Name,
 			"destination", conn.User(), "code", fault.From(resolveErr).Code)
+		s.audit(ctx, audit.Event{
+			Action:    "session.refused",
+			Outcome:   audit.OutcomeDenied,
+			ActorID:   id.UserID,
+			ActorName: id.Name,
+			Object:    sessionID,
+			Reason:    fault.From(resolveErr).Code,
+			Fields: map[string]string{
+				"remote":      remote,
+				"destination": conn.User(),
+				"credential":  id.CredentialID,
+			},
+		})
 	}
 
 	start, forwards, started := s.awaitStart(sessionID, remote, id, requests)
@@ -180,6 +195,22 @@ func (s *Server) proxy(ctx context.Context, sessionID, remote string, id authz.I
 		"credential", id.CredentialID, "target", res.target.Name,
 		"principal", res.destination.principal, "recording", rec.Path())
 
+	s.audit(ctx, audit.Event{
+		Action:    "session.opened",
+		ActorID:   id.UserID,
+		ActorName: id.Name,
+		Object:    sessionID,
+		Fields: map[string]string{
+			"remote":     remote,
+			"role":       id.Role,
+			"credential": id.CredentialID,
+			"target":     res.target.Name,
+			"target_id":  res.target.ID,
+			"principal":  res.destination.principal,
+			"recording":  rec.Path(),
+		},
+	})
+
 	code, reason := s.pump(sessionCtx, sessionID, start, forwards, channel, targetSession, rec)
 
 	s.log.Info("ssh session closed",
@@ -188,6 +219,20 @@ func (s *Server) proxy(ctx context.Context, sessionID, remote string, id authz.I
 		"reason", reason, "recorded_bytes", rec.Recorded())
 
 	s.finish(ctx, sessionID, code, reason, rec)
+	s.audit(ctx, audit.Event{
+		Action:    "session.closed",
+		ActorID:   id.UserID,
+		ActorName: id.Name,
+		Object:    sessionID,
+		Reason:    reason,
+		Fields: map[string]string{
+			"target":         res.target.Name,
+			"principal":      res.destination.principal,
+			"exit":           strconv.FormatUint(uint64(code), 10),
+			"recorded_bytes": strconv.FormatInt(rec.Recorded(), 10),
+		},
+	})
+
 	sendExitStatus(channel, code)
 }
 

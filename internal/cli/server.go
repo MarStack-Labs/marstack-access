@@ -18,6 +18,7 @@ func newServerCmd() *cobra.Command {
 		dataDir     string
 		advertiseIP string
 		devCAKey    string
+		lokiURL     string
 		logLevel    string
 	)
 
@@ -37,6 +38,7 @@ func newServerCmd() *cobra.Command {
 				DataDir:      dataDir,
 				AdvertiseIP:  advertiseIP,
 				DevCAKeyPath: devCAKey,
+				LokiURL:      lokiURL,
 			}, log)
 			if err != nil {
 				return err
@@ -55,6 +57,8 @@ func newServerCmd() *cobra.Command {
 		"address targets see this gateway as, pinned into each session certificate")
 	cmd.Flags().StringVar(&devCAKey, "dev-ca-key", "",
 		"path to a signing key held locally, a development mode, see docs/SECURITY.md")
+	cmd.Flags().StringVar(&lokiURL, "audit-loki-url", "",
+		"base URL of a Loki the audit trail ships to, empty to keep the trail on this host only")
 	cmd.Flags().StringVar(&logLevel, "log-level", "info", "log level: debug, info, warn, error")
 
 	return cmd

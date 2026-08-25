@@ -11,6 +11,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/marstack-labs/marstack-access/internal/dataplane/certs"
+	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 )
@@ -85,6 +86,8 @@ type Server struct {
 	openSession  SessionOpener
 	closeSession SessionCloser
 	live         *registry
+	trail        *audit.Recorder
+	auditPath    string
 	now          func() time.Time
 	sshConfig    *ssh.ServerConfig
 	hostKey      ssh.PublicKey
@@ -92,7 +95,7 @@ type Server struct {
 
 func New(cfg Config, log *slog.Logger, identities Identities, targets TargetLookup,
 	policies Policies, grants Grants, signer certs.Signer,
-	opener SessionOpener, closer SessionCloser) (*Server, error) {
+	opener SessionOpener, closer SessionCloser, trail *audit.Recorder) (*Server, error) {
 	hostKey, err := loadOrCreateHostKey(cfg.DataDir)
 	if err != nil {
 		return nil, err
@@ -109,6 +112,7 @@ func New(cfg Config, log *slog.Logger, identities Identities, targets TargetLook
 		openSession:  opener,
 		closeSession: closer,
 		live:         newRegistry(),
+		trail:        trail,
 		now:          time.Now,
 		hostKey:      hostKey.PublicKey(),
 	}
@@ -143,6 +147,16 @@ func (s *Server) authenticate(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Pe
 			"remote", conn.RemoteAddr().String(),
 			"fingerprint", fingerprint,
 			"reason", fault.From(err).Code)
+		s.audit(context.Background(), audit.Event{
+			Action:  "ssh.authentication",
+			Outcome: audit.OutcomeDenied,
+			Reason:  fault.From(err).Code,
+			Fields: map[string]string{
+				"remote":      conn.RemoteAddr().String(),
+				"fingerprint": fingerprint,
+				"destination": conn.User(),
+			},
+		})
 		return nil, errAuthenticationFailed
 	}
 
@@ -274,5 +288,15 @@ func (s *Server) refuseGlobalRequests(requests <-chan *ssh.Request, remote strin
 				s.log.Error("ssh request reply failed", "error", err.Error())
 			}
 		}
+	}
+}
+
+func (s *Server) audit(ctx context.Context, e audit.Event) {
+	if s.trail == nil {
+		return
+	}
+	if err := s.trail.Record(ctx, e); err != nil {
+		s.log.Error("audit event could not be written",
+			"action", e.Action, "error", err.Error())
 	}
 }
