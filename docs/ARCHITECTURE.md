@@ -159,8 +159,9 @@ Sessions are recorded as asciicast: JSON lines of `[elapsed, "o", bytes]`. There
 pipeline, no transcoder, and no graphical protocol. An hour of shell is kilobytes once compressed,
 and every command is greppable.
 
-The recorder wraps the connection returned by a dialer; it is never the dialer's responsibility.
-An implementation that forgets to record must not be possible to write.
+The recorder is opened before the target is dialed, and the copy loop writes the target's output to
+the user and the recording through one `io.MultiWriter`. Ordering is the enforcement: a failure to
+open the recording refuses the session before any handshake with the target has happened.
 
 ## Roadmap shape
 
@@ -174,6 +175,9 @@ policy      who may reach which target as which principal          done
 approval    JIT request, approve, time-boxed grant                 done
 session     the live session record and the kill switch
 audit       the append-only event trail and the recording index
+
+The proxy, the certificate dialer, and the asciicast recorder are done; what remains is putting a
+session row in the database so the control plane can list live sessions and close one.
 ```
 
 The data plane lives in `internal/dataplane/sshd`. It answers four questions in order, and any one
@@ -289,18 +293,12 @@ to do. `app` owns the filesystem — it holds `DataDir` — so `app` writes the 
 and logs the path. The module never touches the disk, and adding a second bootstrapping module
 requires editing neither `Module` nor any existing module.
 
-The data plane lands as a second subcommand once `target` and `policy` exist, under
-`internal/dataplane`, with one seam:
+A session now runs end to end: the front door authorises, a certificate is minted, the target's
+host key is checked against the pin, and the shell is proxied while the output is recorded.
 
-```go
-type TargetDialer interface {
-	Dial(ctx context.Context, s Session) (Conn, error)
-}
-```
-
-`CertDialer` implements it first. A future `TunnelDialer` — for targets behind NAT, reached by an
-outbound connection from a minimal tunnel client — implements the same interface, and nothing above
-it changes.
+The dialing step is deliberately narrow. It takes a session id, a target, and a principal, and
+returns an `*ssh.Client`. A future path for targets behind NAT — reached by an outbound connection
+from a minimal tunnel client — replaces that one function and nothing above it changes.
 
 Deliberately absent, and not roadmap items: RDP, VNC, video recording, device posture checks, and
 command blocking by pattern matching. [`docs/SECURITY.md`](SECURITY.md) records why each one is

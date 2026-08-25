@@ -231,8 +231,32 @@ Port forwarding is refused in both directions, and so are agent forwarding, X11,
 gateway that forwards ports is a route into the network that no policy describes and no recording
 captures.
 
-The target connection itself is not implemented yet: an authorized session reports what it resolved
-and closes.
+An authorised session now reaches the target. Point the gateway at a signing key and connect:
+
+```sh
+marac ca init --path ./data/ca
+marac server --ssh-listen 127.0.0.1:2222 --dev-ca-key ./data/ca
+```
+
+```sh
+ssh -p 2222 deploy:db-1@gateway
+```
+
+The gateway mints a certificate for that session alone, verifies the target's host key against the
+pin, and proxies the shell while recording the output to `./data/recordings/ses-xxxxx.cast`. Play one
+back with any asciicast player:
+
+```sh
+asciinema play data/recordings/ses-xxxxxxxxxxxxx.cast
+grep -o 'sudo [^"]*' data/recordings/*.cast
+```
+
+Only output is recorded. A shell echoes what is typed, so commands stay greppable, but a password
+typed at a `sudo` prompt is never echoed and so never written down.
+
+> `--dev-ca-key` holds the signing key in a local file. Without it the front door still authorises
+> but cannot connect, and it says so. See [`docs/SECURITY.md`](docs/SECURITY.md) for what the
+> development mode costs.
 
 ## Preparing a target
 

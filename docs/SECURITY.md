@@ -85,7 +85,7 @@ These hold everywhere. A change that weakens one is a design change, not a refac
 | Validate at the boundary | `httpx.Decode` sets `DisallowUnknownFields` and caps body size; `kernel/validate` |
 | No standing credential | there is no schema for one; the signing call lives in `marstack-secrets`, and the file-backed development signer must be named on the command line |
 | Derived identity | authorization middleware puts the identity on the request context; handlers read it from there |
-| Recording is mandatory | the recorder wraps the connection a dialer returns, so no dialer can skip it |
+| Recording is mandatory | the recorder is opened before the target is dialed, and a failure to open it refuses the session |
 | Scoped authority | one place builds the certificate request; principal, target, TTL, and source address are all required fields |
 | Certificate stays inside | the mint call returns a connection, not a credential; nothing serialises a certificate to a response |
 | Audit ships out | the audit sink is write-only by construction; no delete method exists |
@@ -386,6 +386,29 @@ one pinned to a different source address. The first attempt at this used
 `ssh.CertChecker.CheckCert`, which validates principals and validity but **does not verify the
 signature or the authority at all** — that happens in `Authenticate`. The test passed while proving
 nothing about the CA, which is why the checks now run through a handshake.
+
+## Recording
+
+A session is recorded as asciicast v2: a JSON header naming the terminal size, then one
+`[elapsed, "o", data]` line per chunk of output.
+
+**The recorder is opened before the target is dialed.** Invariant 5 says a session that cannot be
+recorded does not open, and the ordering is what makes that true rather than aspirational. Dialing
+first would mean a failure to record leaves behind a completed SSH handshake and a certificate
+authentication that the target's own auth log records and this platform has none of.
+
+There is a test for it, and the first version of that test was wrong: it counted shells started on
+the target, which stays zero when the dial succeeds but the shell never runs. It now counts
+authentications, and was confirmed to fail when the two steps are swapped.
+
+**Only the output direction is recorded, and that is a security property rather than a shortcut.**
+A shell echoes what is typed, so commands appear in the output stream and remain greppable. A
+password typed at a `sudo` prompt is *not* echoed, so it never reaches the recording. Adding an
+input channel would capture commands twice and secrets once. There is a test asserting no `"i"`
+event is ever written.
+
+**Recordings are `0600` in a `0700` directory, named by session id.** The file is opened with
+`O_EXCL`, so a session id collision fails rather than appending to somebody else's recording.
 
 ## Bootstrap
 

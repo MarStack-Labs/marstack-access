@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
+	"github.com/marstack-labs/marstack-access/internal/dataplane/certs"
 	"github.com/marstack-labs/marstack-access/internal/dataplane/sshd"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
@@ -37,6 +40,8 @@ type Config struct {
 	Listen         string
 	SSHListen      string
 	DataDir        string
+	AdvertiseIP    string
+	DevCAKeyPath   string
 	RequestTimeout time.Duration
 }
 
@@ -104,9 +109,19 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	}
 
 	if cfg.SSHListen != "" {
+		signer, signerErr := loadSigner(cfg, log)
+		if signerErr != nil {
+			st.Close()
+			return nil, signerErr
+		}
+
 		a.sshd, err = sshd.New(
-			sshd.Config{Listen: cfg.SSHListen, DataDir: cfg.DataDir},
-			log, idm, targetLookup(targets), policies, grants)
+			sshd.Config{
+				Listen:      cfg.SSHListen,
+				DataDir:     cfg.DataDir,
+				AdvertiseIP: cfg.AdvertiseIP,
+			},
+			log, idm, targetLookup(targets), policies, grants, signer)
 		if err != nil {
 			st.Close()
 			return nil, err
@@ -125,6 +140,25 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	}
 
 	return a, nil
+}
+
+func loadSigner(cfg Config, log *slog.Logger) (certs.Signer, error) {
+	if cfg.DevCAKeyPath == "" {
+		log.Warn("no signing authority configured, sessions will resolve but not connect",
+			"hint", "marac ca init --path <file>, then --dev-ca-key <file>")
+		return nil, nil
+	}
+
+	signer, err := certs.Load(cfg.DevCAKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load signing key: %w", err)
+	}
+
+	log.Warn("using a signing key held in a local file",
+		"path", cfg.DevCAKeyPath,
+		"fingerprint", ssh.FingerprintSHA256(signer.PublicKey()),
+		"note", "a production deployment keeps this in marstack-secrets")
+	return signer, nil
 }
 
 func targetLookup(targets *target.Module) sshd.TargetLookup {

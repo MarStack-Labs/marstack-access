@@ -13,10 +13,12 @@ import (
 
 func newServerCmd() *cobra.Command {
 	var (
-		listen    string
-		sshListen string
-		dataDir   string
-		logLevel  string
+		listen      string
+		sshListen   string
+		dataDir     string
+		advertiseIP string
+		devCAKey    string
+		logLevel    string
 	)
 
 	cmd := &cobra.Command{
@@ -30,9 +32,11 @@ func newServerCmd() *cobra.Command {
 			log := logging.New(logLevel, os.Stderr)
 
 			a, err := app.New(ctx, app.Config{
-				Listen:    listen,
-				SSHListen: sshListen,
-				DataDir:   dataDir,
+				Listen:       listen,
+				SSHListen:    sshListen,
+				DataDir:      dataDir,
+				AdvertiseIP:  advertiseIP,
+				DevCAKeyPath: devCAKey,
 			}, log)
 			if err != nil {
 				return err
@@ -47,6 +51,10 @@ func newServerCmd() *cobra.Command {
 	cmd.Flags().StringVar(&sshListen, "ssh-listen", "",
 		"address the SSH data plane listens on, empty to leave it off")
 	cmd.Flags().StringVar(&dataDir, "data-dir", "./data", "directory holding the control plane database")
+	cmd.Flags().StringVar(&advertiseIP, "advertise-ip", "",
+		"address targets see this gateway as, pinned into each session certificate")
+	cmd.Flags().StringVar(&devCAKey, "dev-ca-key", "",
+		"path to a signing key held locally, a development mode, see docs/SECURITY.md")
 	cmd.Flags().StringVar(&logLevel, "log-level", "info", "log level: debug, info, warn, error")
 
 	return cmd

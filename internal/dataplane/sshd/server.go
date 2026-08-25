@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/marstack-labs/marstack-access/internal/dataplane/certs"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 )
@@ -46,8 +47,9 @@ type Grants interface {
 type TargetLookup func(ctx context.Context, name string) (Target, error)
 
 type Config struct {
-	Listen  string
-	DataDir string
+	Listen      string
+	DataDir     string
+	AdvertiseIP string
 }
 
 type Server struct {
@@ -57,12 +59,14 @@ type Server struct {
 	targets    TargetLookup
 	policies   Policies
 	grants     Grants
+	dialer     *dialer
+	now        func() time.Time
 	sshConfig  *ssh.ServerConfig
 	hostKey    ssh.PublicKey
 }
 
 func New(cfg Config, log *slog.Logger, identities Identities, targets TargetLookup,
-	policies Policies, grants Grants) (*Server, error) {
+	policies Policies, grants Grants, signer certs.Signer) (*Server, error) {
 	hostKey, err := loadOrCreateHostKey(cfg.DataDir)
 	if err != nil {
 		return nil, err
@@ -75,6 +79,8 @@ func New(cfg Config, log *slog.Logger, identities Identities, targets TargetLook
 		targets:    targets,
 		policies:   policies,
 		grants:     grants,
+		dialer:     &dialer{signer: signer, advertiseIP: cfg.AdvertiseIP, now: time.Now},
+		now:        time.Now,
 		hostKey:    hostKey.PublicKey(),
 	}
 

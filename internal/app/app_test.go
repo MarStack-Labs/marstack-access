@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/dataplane/certs"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/logging"
 )
@@ -826,5 +827,74 @@ func TestARequesterIDInTheBodyIsRejected(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: a caller must not be able to name the requester", rec.Code)
+	}
+}
+
+func TestTheSSHListenerIsOffUnlessAskedFor(t *testing.T) {
+	a := newTestApp(t)
+
+	if a.sshd != nil {
+		t.Fatal("the SSH data plane was constructed without --ssh-listen. A security product must not open a port nobody asked for")
+	}
+}
+
+func TestADevCAKeyThatDoesNotExistFailsStartup(t *testing.T) {
+	_, err := New(context.Background(), Config{
+		DataDir:      t.TempDir(),
+		SSHListen:    "127.0.0.1:0",
+		DevCAKeyPath: filepath.Join(t.TempDir(), "absent"),
+	}, logging.New("error", io.Discard))
+
+	if err == nil {
+		t.Fatal("startup succeeded with a signing key path that does not exist. Starting anyway would leave every session refusing at connect time instead of failing where the operator can see it")
+	}
+}
+
+func TestTheSSHListenerStartsWithoutASignerAndSaysSo(t *testing.T) {
+	var logged bytes.Buffer
+
+	a, err := New(context.Background(), Config{
+		DataDir:   t.TempDir(),
+		SSHListen: "127.0.0.1:0",
+	}, slog.New(slog.NewTextHandler(&logged, nil)))
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer a.Close()
+
+	if a.sshd == nil {
+		t.Fatal("the SSH listener was not built")
+	}
+	if !strings.Contains(logged.String(), "no signing authority") {
+		t.Fatalf("the log does not warn that sessions cannot connect: %s", logged.String())
+	}
+}
+
+func TestUsingALocalSigningKeyIsLoggedAsSuch(t *testing.T) {
+	var logged bytes.Buffer
+	path := filepath.Join(t.TempDir(), "ca")
+	if _, err := certs.Create(path); err != nil {
+		t.Fatalf("create ca: %v", err)
+	}
+
+	a, err := New(context.Background(), Config{
+		DataDir:      t.TempDir(),
+		SSHListen:    "127.0.0.1:0",
+		DevCAKeyPath: path,
+	}, slog.New(slog.NewTextHandler(&logged, nil)))
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer a.Close()
+
+	out := logged.String()
+	if !strings.Contains(out, "signing key held in a local file") {
+		t.Fatalf("the log does not say the key is local: %s", out)
+	}
+	if !strings.Contains(out, "marstack-secrets") {
+		t.Errorf("the log does not name where the key belongs in production: %s", out)
+	}
+	if strings.Contains(out, "PRIVATE KEY") {
+		t.Fatal("the log carries key material")
 	}
 }

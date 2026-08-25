@@ -3,21 +3,23 @@ package sshd
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
+	"github.com/marstack-labs/marstack-access/internal/kernel/ids"
 )
 
 const (
-	exitAuthorized = 0
-	exitRefused    = 1
-
+	exitRefused  = 1
 	startTimeout = 30 * time.Second
+	idPrefix     = "ses"
 )
 
 type resolved struct {
@@ -25,71 +27,241 @@ type resolved struct {
 	target      Target
 }
 
+type ptyRequest struct {
+	requested bool
+	term      string
+	cols      int
+	rows      int
+}
+
+type startRequest struct {
+	kind    string
+	command string
+	pty     ptyRequest
+}
+
 func (s *Server) serveSession(ctx context.Context, conn *ssh.ServerConn, id authz.Identity,
 	channel ssh.Channel, requests <-chan *ssh.Request) {
 	defer channel.Close()
 
 	remote := conn.RemoteAddr().String()
-	res, resolveErr := s.resolve(ctx, id, conn.User())
+	sessionID := ids.New(idPrefix)
 
+	res, resolveErr := s.resolve(ctx, id, conn.User())
 	if resolveErr != nil {
 		s.log.Warn("ssh session refused",
-			"remote", remote, "user", id.Name, "destination", conn.User(),
-			"code", fault.From(resolveErr).Code)
-	} else {
-		s.log.Info("ssh session authorized",
-			"remote", remote, "user", id.Name,
-			"target", res.target.Name, "principal", res.destination.principal)
+			"session", sessionID, "remote", remote, "user", id.Name,
+			"destination", conn.User(), "code", fault.From(resolveErr).Code)
 	}
 
-	if !s.awaitStart(remote, id, requests) {
+	start, forwards, started := s.awaitStart(sessionID, remote, id, requests)
+	if !started {
 		return
 	}
 
 	if resolveErr != nil {
-		f := fault.From(resolveErr)
-		writeLine(channel.Stderr(), "marstack-access: refused")
-		writeLine(channel.Stderr(), "  "+f.Message)
-		sendExitStatus(channel, exitRefused)
+		s.refuse(channel, resolveErr)
 		return
 	}
 
-	writeLine(channel, "marstack-access: authorized")
-	writeLine(channel, fmt.Sprintf("  user       %s (%s)", id.Name, id.Role))
-	writeLine(channel, fmt.Sprintf("  target     %s at %s:%d",
-		res.target.Name, res.target.Address, res.target.Port))
-	writeLine(channel, fmt.Sprintf("  principal  %s", res.destination.principal))
-	writeLine(channel, "")
-	writeLine(channel, "The target connection is not implemented yet, so this session ends here.")
-	sendExitStatus(channel, exitAuthorized)
+	s.proxy(ctx, sessionID, remote, id, res, start, forwards, channel)
 }
 
-func (s *Server) awaitStart(remote string, id authz.Identity, requests <-chan *ssh.Request) bool {
+func (s *Server) refuse(channel ssh.Channel, err error) {
+	f := fault.From(err)
+	writeLine(channel.Stderr(), "marstack-access: refused")
+	writeLine(channel.Stderr(), "  "+f.Message)
+	sendExitStatus(channel, exitRefused)
+}
+
+func (s *Server) awaitStart(sessionID, remote string, id authz.Identity,
+	requests <-chan *ssh.Request) (startRequest, <-chan *ssh.Request, bool) {
 	deadline := time.NewTimer(startTimeout)
 	defer deadline.Stop()
+
+	start := startRequest{pty: ptyRequest{term: defaultTerm, cols: defaultCols, rows: defaultRows}}
 
 	for {
 		select {
 		case req, ok := <-requests:
 			if !ok {
-				return false
+				return startRequest{}, nil, false
 			}
 
 			switch req.Type {
-			case "shell", "exec":
+			case "pty-req":
+				start.pty = parsePtyRequest(req.Payload)
 				reply(req, true)
-				return true
-			case "pty-req", "env", "window-change", "signal":
+			case "shell":
+				start.kind = "shell"
+				reply(req, true)
+				return start, requests, true
+			case "exec":
+				start.kind = "exec"
+				start.command = parseExecRequest(req.Payload)
+				reply(req, true)
+				return start, requests, true
+			case "env", "window-change", "signal":
 				reply(req, true)
 			default:
 				s.log.Warn("ssh session request refused",
-					"remote", remote, "user", id.Name, "type", req.Type)
+					"session", sessionID, "remote", remote, "user", id.Name, "type", req.Type)
 				reply(req, false)
 			}
 
 		case <-deadline.C:
-			s.log.Warn("ssh session never started", "remote", remote, "user", id.Name)
-			return false
+			s.log.Warn("ssh session never started",
+				"session", sessionID, "remote", remote, "user", id.Name)
+			return startRequest{}, nil, false
+		}
+	}
+}
+
+func (s *Server) proxy(ctx context.Context, sessionID, remote string, id authz.Identity,
+	res resolved, start startRequest, forwards <-chan *ssh.Request, channel ssh.Channel) {
+	rec, err := newRecorder(s.cfg.DataDir, sessionID, start.pty, s.now)
+	if err != nil {
+		s.log.Error("ssh recording could not be opened",
+			"session", sessionID, "user", id.Name, "error", err.Error())
+		s.refuse(channel, fault.Unavailable("recording_unavailable",
+			"this session cannot be recorded, so it will not be opened"))
+		return
+	}
+	defer rec.Close()
+
+	client, err := s.dialer.dial(ctx, sessionID, res.target, res.destination.principal)
+	if err != nil {
+		s.log.Warn("ssh target dial failed",
+			"session", sessionID, "user", id.Name, "target", res.target.Name,
+			"code", fault.From(err).Code)
+		s.refuse(channel, err)
+		return
+	}
+	defer client.Close()
+
+	targetSession, err := client.NewSession()
+	if err != nil {
+		s.refuse(channel, fault.Unavailable("target_session_failed",
+			fmt.Sprintf("the target refused a session: %v", err)))
+		return
+	}
+	defer targetSession.Close()
+
+	s.log.Info("ssh session opened",
+		"session", sessionID, "remote", remote, "user", id.Name, "role", id.Role,
+		"credential", id.CredentialID, "target", res.target.Name,
+		"principal", res.destination.principal, "recording", rec.Path())
+
+	code, reason := s.pump(ctx, sessionID, start, forwards, channel, targetSession, rec)
+
+	s.log.Info("ssh session closed",
+		"session", sessionID, "user", id.Name, "target", res.target.Name,
+		"principal", res.destination.principal, "exit", code,
+		"reason", reason, "recorded_bytes", rec.Recorded())
+
+	sendExitStatus(channel, code)
+}
+
+func (s *Server) pump(ctx context.Context, sessionID string, start startRequest,
+	forwards <-chan *ssh.Request, channel ssh.Channel, targetSession *ssh.Session,
+	rec *recorder) (uint32, string) {
+	if start.pty.requested {
+		if err := targetSession.RequestPty(start.pty.term, start.pty.rows, start.pty.cols,
+			ssh.TerminalModes{}); err != nil {
+			return exitRefused, "pty refused by target"
+		}
+	}
+
+	targetStdin, err := targetSession.StdinPipe()
+	if err != nil {
+		return exitRefused, "target stdin unavailable"
+	}
+	targetStdout, err := targetSession.StdoutPipe()
+	if err != nil {
+		return exitRefused, "target stdout unavailable"
+	}
+	targetStderr, err := targetSession.StderrPipe()
+	if err != nil {
+		return exitRefused, "target stderr unavailable"
+	}
+
+	if err := s.begin(targetSession, start); err != nil {
+		return exitRefused, "target refused to start the session"
+	}
+
+	go forwardWindowChanges(ctx, forwards, targetSession)
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(targetStdin, channel)
+		_ = targetStdin.Close()
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(io.MultiWriter(channel, rec), targetStdout)
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(io.MultiWriter(channel.Stderr(), rec), targetStderr)
+	}()
+
+	done := make(chan error, 1)
+	go func() { done <- targetSession.Wait() }()
+
+	select {
+	case waitErr := <-done:
+		wg.Wait()
+		return exitCodeOf(waitErr)
+	case <-ctx.Done():
+		_ = targetSession.Signal(ssh.SIGHUP)
+		_ = targetSession.Close()
+		return exitRefused, "gateway shutting down"
+	}
+}
+
+func (s *Server) begin(targetSession *ssh.Session, start startRequest) error {
+	if start.kind == "exec" {
+		return targetSession.Start(start.command)
+	}
+	return targetSession.Shell()
+}
+
+func exitCodeOf(waitErr error) (uint32, string) {
+	if waitErr == nil {
+		return 0, "target session ended"
+	}
+
+	var exitErr *ssh.ExitError
+	if errors.As(waitErr, &exitErr) {
+		return boundedExitStatus(exitErr.ExitStatus()), "target exit status"
+	}
+	return exitRefused, waitErr.Error()
+}
+
+func boundedExitStatus(status int) uint32 {
+	if status < 0 || status > 255 {
+		return exitRefused
+	}
+	return uint32(status)
+}
+
+func forwardWindowChanges(ctx context.Context, requests <-chan *ssh.Request, targetSession *ssh.Session) {
+	for {
+		select {
+		case req, ok := <-requests:
+			if !ok {
+				return
+			}
+			if req.Type == "window-change" {
+				pty := parsePtyDimensions(req.Payload)
+				_ = targetSession.WindowChange(pty.rows, pty.cols)
+			}
+			reply(req, req.Type == "window-change")
+		case <-ctx.Done():
+			return
 		}
 	}
 }

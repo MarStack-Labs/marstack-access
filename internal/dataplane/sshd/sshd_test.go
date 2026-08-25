@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"io"
 	"net"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/marstack-labs/marstack-access/internal/dataplane/certs"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 	"github.com/marstack-labs/marstack-access/internal/kernel/logging"
@@ -98,8 +100,14 @@ func newKeyPair(t *testing.T) ssh.Signer {
 func startServer(t *testing.T, st *stubs) (*Server, string) {
 	t.Helper()
 
-	srv, err := New(Config{Listen: "127.0.0.1:0", DataDir: t.TempDir()},
-		logging.New("error", io.Discard), st, st.lookup, st, st)
+	return startServerWith(t, st, nil, t.TempDir())
+}
+
+func startServerWith(t *testing.T, st *stubs, signer certs.Signer, dataDir string) (*Server, string) {
+	t.Helper()
+
+	srv, err := New(Config{Listen: "127.0.0.1:0", DataDir: dataDir, AdvertiseIP: "127.0.0.1"},
+		logging.New("error", io.Discard), st, st.lookup, st, st, signer)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
@@ -180,19 +188,17 @@ func registeredAlice(t *testing.T) (*stubs, ssh.Signer) {
 	return st, signer
 }
 
-func TestAnAuthorizedSessionReportsTheResolvedChain(t *testing.T) {
+func TestASessionWithNoSignerCannotConnect(t *testing.T) {
 	st, signer := registeredAlice(t)
 	srv, addr := startServer(t, st)
 
 	res := dial(t, srv, addr, "deploy:db-1", signer)
-	if res.err != nil {
-		t.Fatalf("session failed: %v (stderr: %s)", res.err, res.stderr)
-	}
 
-	for _, want := range []string{"authorized", "alice (operator)", "db-1 at 10.0.0.4:22", "deploy"} {
-		if !strings.Contains(res.stdout, want) {
-			t.Errorf("output missing %q:\n%s", want, res.stdout)
-		}
+	if res.err == nil {
+		t.Fatal("a session opened with no signing authority configured")
+	}
+	if !strings.Contains(res.stderr, "no signing authority") {
+		t.Fatalf("stderr = %q, want it to name the missing signer", res.stderr)
 	}
 }
 
@@ -347,13 +353,13 @@ func TestTheHostKeyIsStableAcrossRestarts(t *testing.T) {
 	st := newStubs()
 
 	first, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st)
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil)
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
 
 	second, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st)
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil)
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -368,7 +374,7 @@ func TestTheHostKeyIsNotWorldReadable(t *testing.T) {
 	st := newStubs()
 
 	if _, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st); err != nil {
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil); err != nil {
 		t.Fatalf("new: %v", err)
 	}
 
@@ -390,7 +396,7 @@ func TestACorruptHostKeyFailsRatherThanBeingReplaced(t *testing.T) {
 	}
 
 	if _, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st); err == nil {
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil); err == nil {
 		t.Fatal("a corrupt host key was silently replaced. Generating a new one would make every client's stored key wrong at once, which is indistinguishable from an attack")
 	}
 }
@@ -501,41 +507,6 @@ func TestASessionThatNeverStartsIsNotLeftOpen(t *testing.T) {
 	}
 }
 
-func TestExecIsTreatedLikeAShell(t *testing.T) {
-	st, signer := registeredAlice(t)
-	srv, addr := startServer(t, st)
-
-	hostKey, _, _, _, err := ssh.ParseAuthorizedKey(ssh.MarshalAuthorizedKey(srv.hostKey))
-	if err != nil {
-		t.Fatalf("parse host key: %v", err)
-	}
-
-	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
-		User:            "deploy:db-1",
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.FixedHostKey(hostKey),
-		Timeout:         10 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer client.Close()
-
-	session, err := client.NewSession()
-	if err != nil {
-		t.Fatalf("new session: %v", err)
-	}
-	defer session.Close()
-
-	out, err := session.Output("whoami")
-	if err != nil {
-		t.Fatalf("exec failed: %v", err)
-	}
-	if !strings.Contains(string(out), "authorized") {
-		t.Fatalf("exec output = %q, want the same verdict a shell gets", out)
-	}
-}
-
 func TestATargetWithNoPinnedHostKeyIsRefused(t *testing.T) {
 	st, signer := registeredAlice(t)
 	unpinned := st.targets["db-1"]
@@ -552,4 +523,320 @@ func TestATargetWithNoPinnedHostKeyIsRefused(t *testing.T) {
 	if !strings.Contains(res.stderr, "no pinned host key") {
 		t.Fatalf("stderr = %q, want it to name the missing pin", res.stderr)
 	}
+}
+
+func withRealTarget(t *testing.T) (*Server, string, ssh.Signer, *fakeTarget, string) {
+	t.Helper()
+
+	ca := newTestCA(t)
+	target := startFakeTarget(t, ca)
+
+	st, clientKey := registeredAlice(t)
+	st.targets["db-1"] = fakeTargetEntry(t, target)
+
+	dataDir := t.TempDir()
+	srv, addr := startServerWith(t, st, ca, dataDir)
+	return srv, addr, clientKey, target, dataDir
+}
+
+func TestASessionReachesTheTargetAndCarriesItsOutput(t *testing.T) {
+	srv, addr, clientKey, target, _ := withRealTarget(t)
+
+	res := dial(t, srv, addr, "deploy:db-1", clientKey)
+	if res.err != nil {
+		t.Fatalf("session failed: %v (stderr: %s)", res.err, res.stderr)
+	}
+
+	if !strings.Contains(res.stdout, "welcome to db-1") {
+		t.Fatalf("stdout = %q, want the target's own banner", res.stdout)
+	}
+
+	users, certificates, sessions := target.seen()
+	if sessions != 1 {
+		t.Fatalf("the target saw %d sessions, want 1", sessions)
+	}
+	if len(users) != 1 || users[0] != "deploy" {
+		t.Fatalf("the target saw users %v, want [deploy]", users)
+	}
+	if len(certificates) != 1 || certificates[0] == nil {
+		t.Fatal("the target did not authenticate a certificate")
+	}
+}
+
+func TestTheCertificateTheTargetSeesIsScopedToTheSession(t *testing.T) {
+	srv, addr, clientKey, target, _ := withRealTarget(t)
+
+	if res := dial(t, srv, addr, "deploy:db-1", clientKey); res.err != nil {
+		t.Fatalf("session failed: %v (%s)", res.err, res.stderr)
+	}
+
+	_, certificates, _ := target.seen()
+	cert := certificates[0]
+
+	if len(cert.ValidPrincipals) != 1 || cert.ValidPrincipals[0] != "deploy" {
+		t.Errorf("principals = %v, want [deploy]", cert.ValidPrincipals)
+	}
+	if !strings.HasPrefix(cert.KeyId, "ses-") {
+		t.Errorf("key id = %q, want a session id so the target's own logs name the session", cert.KeyId)
+	}
+	if got := cert.Permissions.CriticalOptions["source-address"]; got != "127.0.0.1/32" {
+		t.Errorf("source-address = %q, want the gateway pinned to a single host", got)
+	}
+	if _, present := cert.Permissions.Extensions["permit-port-forwarding"]; present {
+		t.Error("the certificate the target accepted grants port forwarding")
+	}
+	if window := cert.ValidBefore - cert.ValidAfter; window > uint64((certLifetime + clockSkew).Seconds()) {
+		t.Errorf("validity window = %d seconds, want at most %v", window, certLifetime+clockSkew)
+	}
+}
+
+func TestTheUserNeverReceivesTheCertificate(t *testing.T) {
+	srv, addr, clientKey, target, _ := withRealTarget(t)
+
+	res := dial(t, srv, addr, "deploy:db-1", clientKey)
+	if res.err != nil {
+		t.Fatalf("session failed: %v", res.err)
+	}
+
+	_, certificates, _ := target.seen()
+	marshalled := string(ssh.MarshalAuthorizedKey(certificates[0]))
+
+	for _, stream := range []string{res.stdout, res.stderr} {
+		if strings.Contains(stream, "cert-v01") || strings.Contains(stream, marshalled) {
+			t.Fatal("the session wrote the certificate to the user. If a user held a usable certificate they could ssh straight to the target and leave no recording")
+		}
+	}
+}
+
+func TestTheSessionIsRecordedAsAsciicast(t *testing.T) {
+	srv, addr, clientKey, _, dataDir := withRealTarget(t)
+
+	if res := dial(t, srv, addr, "deploy:db-1", clientKey); res.err != nil {
+		t.Fatalf("session failed: %v (%s)", res.err, res.stderr)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(dataDir, recordingDir))
+	if err != nil {
+		t.Fatalf("read recordings: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("%d recordings written, want 1", len(entries))
+	}
+	if !strings.HasSuffix(entries[0].Name(), ".cast") {
+		t.Errorf("recording name = %q, want a .cast suffix", entries[0].Name())
+	}
+
+	path := filepath.Join(dataDir, recordingDir, entries[0].Name())
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read recording: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("recording has %d lines, want a header and at least one event: %s", len(lines), raw)
+	}
+
+	var head header
+	if err := json.Unmarshal([]byte(lines[0]), &head); err != nil {
+		t.Fatalf("header is not JSON: %v (%s)", err, lines[0])
+	}
+	if head.Version != 2 {
+		t.Errorf("version = %d, want 2", head.Version)
+	}
+	if head.Width == 0 || head.Height == 0 {
+		t.Errorf("header = %+v, want terminal dimensions", head)
+	}
+	if head.Timestamp == 0 {
+		t.Error("header carries no timestamp")
+	}
+
+	var event []any
+	if err := json.Unmarshal([]byte(lines[1]), &event); err != nil {
+		t.Fatalf("event is not JSON: %v (%s)", err, lines[1])
+	}
+	if len(event) != 3 || event[1] != "o" {
+		t.Fatalf("event = %v, want [elapsed, \"o\", data]", event)
+	}
+	if data, _ := event[2].(string); !strings.Contains(data, "welcome to db-1") {
+		t.Fatalf("the first event does not carry the target's output: %v", event)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != recordingPerm {
+		t.Fatalf("recording mode = %#o, want %#o", perm, recordingPerm)
+	}
+}
+
+func TestWhatTheUserTypesIsRecordedOnlyBecauseTheTargetEchoesIt(t *testing.T) {
+	srv, addr, clientKey, _, dataDir := withRealTarget(t)
+
+	hostKey, _, _, _, err := ssh.ParseAuthorizedKey(ssh.MarshalAuthorizedKey(srv.hostKey))
+	if err != nil {
+		t.Fatalf("parse host key: %v", err)
+	}
+
+	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		User:            "deploy:db-1",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(clientKey)},
+		HostKeyCallback: ssh.FixedHostKey(hostKey),
+		Timeout:         10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin: %v", err)
+	}
+	var stdout strings.Builder
+	session.Stdout = &stdout
+
+	if err := session.Shell(); err != nil {
+		t.Fatalf("shell: %v", err)
+	}
+	if _, err := io.WriteString(stdin, "uptime\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	stdin.Close()
+	_ = session.Wait()
+
+	entries, err := os.ReadDir(filepath.Join(dataDir, recordingDir))
+	if err != nil {
+		t.Fatalf("read recordings: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dataDir, recordingDir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read recording: %v", err)
+	}
+
+	if !strings.Contains(string(raw), "uptime") {
+		t.Fatal("the echoed command is missing from the recording, so shell activity would not be greppable")
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n")[1:] {
+		var event []any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("event is not JSON: %v", err)
+		}
+		if event[1] == "i" {
+			t.Fatal(`the recording carries an "i" input event. Recording only output means a password typed at a sudo prompt is never written down, because the target does not echo it`)
+		}
+	}
+}
+
+func TestARecordingThatCannotBeOpenedRefusesTheSession(t *testing.T) {
+	ca := newTestCA(t)
+	target := startFakeTarget(t, ca)
+
+	st, clientKey := registeredAlice(t)
+	st.targets["db-1"] = fakeTargetEntry(t, target)
+
+	dataDir := t.TempDir()
+	blocked := filepath.Join(dataDir, recordingDir)
+	if err := os.WriteFile(blocked, []byte("not a directory\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	srv, addr := startServerWith(t, st, ca, dataDir)
+
+	res := dial(t, srv, addr, "deploy:db-1", clientKey)
+
+	if res.err == nil {
+		t.Fatal("a session opened even though it could not be recorded")
+	}
+	if !strings.Contains(res.stderr, "cannot be recorded") {
+		t.Fatalf("stderr = %q, want it to say the session cannot be recorded", res.stderr)
+	}
+	if users, _, _ := target.seen(); len(users) != 0 {
+		t.Fatalf("the target authenticated %d times before the recorder was open. Counting shells would miss this: the handshake and the certificate check already happened, and the target's own auth log would show a login that this platform has no recording of",
+			len(users))
+	}
+}
+
+func TestAHostKeyThatDoesNotMatchThePinIsRefused(t *testing.T) {
+	ca := newTestCA(t)
+	target := startFakeTarget(t, ca)
+
+	st, clientKey := registeredAlice(t)
+	entry := fakeTargetEntry(t, target)
+	entry.HostKey = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(newKeyPair(t).PublicKey())))
+	st.targets["db-1"] = entry
+
+	srv, addr := startServerWith(t, st, ca, t.TempDir())
+
+	res := dial(t, srv, addr, "deploy:db-1", clientKey)
+
+	if res.err == nil {
+		t.Fatal("the gateway connected to a host whose key does not match the pin")
+	}
+	if !strings.Contains(res.stderr, "could not open a session") {
+		t.Fatalf("stderr = %q, want a dial failure", res.stderr)
+	}
+}
+
+func TestATargetThatDistrustsOurCARefusesTheSession(t *testing.T) {
+	ours := newTestCA(t)
+	theirs := newTestCA(t)
+	target := startFakeTarget(t, theirs)
+
+	st, clientKey := registeredAlice(t)
+	st.targets["db-1"] = fakeTargetEntry(t, target)
+
+	srv, addr := startServerWith(t, st, ours, t.TempDir())
+
+	res := dial(t, srv, addr, "deploy:db-1", clientKey)
+
+	if res.err == nil {
+		t.Fatal("a target trusting a different CA accepted our certificate")
+	}
+}
+
+func TestExecRunsOnTheTarget(t *testing.T) {
+	srv, addr, clientKey, target, _ := withRealTarget(t)
+
+	hostKey, _, _, _, err := ssh.ParseAuthorizedKey(ssh.MarshalAuthorizedKey(srv.hostKey))
+	if err != nil {
+		t.Fatalf("parse host key: %v", err)
+	}
+
+	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		User:            "deploy:db-1",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(clientKey)},
+		HostKeyCallback: ssh.FixedHostKey(hostKey),
+		Timeout:         10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	defer session.Close()
+
+	out, err := session.Output("uptime")
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if !strings.Contains(string(out), "welcome to db-1") {
+		t.Fatalf("exec output = %q, want the target's output", out)
+	}
+
+	waitFor(t, "the target to see the session", func() bool {
+		_, _, sessions := target.seen()
+		return sessions == 1
+	})
 }
