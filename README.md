@@ -54,6 +54,16 @@ make hooks      # install the pre-commit hook, once per clone
 make tools      # install the security scanners
 make build
 ./bin/marac version
+./bin/marac server
+```
+
+The control plane binds `127.0.0.1:7443` by default and creates its database under `./data`. It
+binds loopback rather than every interface on purpose — exposing it is a deployment decision, not a
+default.
+
+```sh
+curl -s localhost:7443/healthz
+curl -s localhost:7443/v1/version
 ```
 
 ## Development
