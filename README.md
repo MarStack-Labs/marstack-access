@@ -77,6 +77,8 @@ Every route except `GET /healthz` needs a token. Roles are ranked, and a check m
 | `GET /healthz` | nothing — a load balancer probe carries no credential |
 | `GET /v1/version` | `viewer` |
 | `marac target …` | `operator` |
+| `marac request create/list/get/cancel` | `operator` |
+| `marac request approve/deny/grant` | `admin` |
 | `marac user …`, `marac token …`, `marac policy …` | `admin` |
 
 Create a working account rather than using the bootstrap admin for daily work:
@@ -146,6 +148,29 @@ reason:  granted by policy pol-xxxxxxxxxxxxx
 
 A denial always carries a reason, because an undiagnosable denial gets worked around by granting too
 much.
+
+A policy is a bound, not an entitlement. Access becomes live only through an approved request:
+
+```sh
+marac request create --target tgt-xxxxxxxxxxxxx --principal deploy \
+  --reason 'incident 4821' --ttl 2h
+
+marac request list
+marac request approve req-xxxxxxxxxxxxx     # admin, and never the requester
+marac request grant --user usr-xxxxxxxxxxxxx \
+  --target tgt-xxxxxxxxxxxxx --principal deploy
+```
+
+The requester is taken from the token — there is no flag for it, and a body naming one is rejected.
+A request is refused up front if no policy could ever permit it, so approval is a gate in front of
+policy rather than a way around it.
+
+**Self-approval is impossible, including for admins.** The account that raised a request cannot
+approve or deny it. A single-account install therefore cannot grant itself access, which is the
+control working rather than a bug.
+
+Grants are time-boxed and expiry is derived from the clock, so there is no background job that can
+stop running and leave access open.
 
 The client talks to `$MARAC_ENDPOINT`, or `--endpoint`, or loopback. `--output json` prints the raw
 API response for scripting:

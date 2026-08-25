@@ -50,6 +50,7 @@ func newRootCmd() *cobra.Command {
 		newUserCmd(g),
 		newTokenCmd(g),
 		newPolicyCmd(g),
+		newRequestCmd(g),
 	)
 	return root
 }

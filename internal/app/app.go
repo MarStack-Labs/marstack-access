@@ -12,6 +12,7 @@ import (
 
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
+	"github.com/marstack-labs/marstack-access/internal/platform/approval"
 	"github.com/marstack-labs/marstack-access/internal/platform/identity"
 	"github.com/marstack-labs/marstack-access/internal/platform/policy"
 	"github.com/marstack-labs/marstack-access/internal/platform/system"
@@ -77,12 +78,14 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	idm = identity.New(st, log, guard)
 
 	targets := target.New(st, log, guard)
+	policies := policy.New(st, log, guard, targets)
 
 	a.modules = []Module{
 		system.New(st, log, guard),
 		idm,
 		targets,
-		policy.New(st, log, guard, targets),
+		policies,
+		approval.New(st, log, guard, policies),
 	}
 
 	if err := a.migrate(ctx); err != nil {

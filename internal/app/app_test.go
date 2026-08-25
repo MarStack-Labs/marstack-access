@@ -151,6 +151,13 @@ func TestEveryRouteExceptHealthzRequiresTheToken(t *testing.T) {
 		{http.MethodGet, "/v1/policies/pol-abc"},
 		{http.MethodDelete, "/v1/policies/pol-abc"},
 		{http.MethodPost, "/v1/policies/evaluate"},
+		{http.MethodGet, "/v1/access-requests"},
+		{http.MethodPost, "/v1/access-requests"},
+		{http.MethodGet, "/v1/access-requests/req-abc"},
+		{http.MethodPost, "/v1/access-requests/req-abc/approve"},
+		{http.MethodPost, "/v1/access-requests/req-abc/deny"},
+		{http.MethodPost, "/v1/access-requests/req-abc/cancel"},
+		{http.MethodPost, "/v1/access-requests/grant"},
 	}
 
 	for _, route := range protected {
@@ -674,5 +681,146 @@ func TestAnOperatorCannotWritePolicy(t *testing.T) {
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403: an operator who can write policy can grant itself anything", rec.Code)
+	}
+}
+
+func TestJustInTimeAccessEndToEnd(t *testing.T) {
+	a, admin := newTestAppWithAdmin(t)
+
+	created := send(t, a, http.MethodPost, "/v1/targets", admin,
+		`{"name":"db-1","address":"10.0.0.4","principals":["deploy"]}`)
+	targetID := decodeBody(t, created)["id"].(string)
+
+	operator := tokenForRole(t, a, admin, "alice", authz.RoleOperator)
+	users := send(t, a, http.MethodGet, "/v1/users", admin, "")
+	var userList struct {
+		Users []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"users"`
+	}
+	if err := json.Unmarshal(users.Body.Bytes(), &userList); err != nil {
+		t.Fatalf("decode users: %v", err)
+	}
+	var aliceID string
+	for _, u := range userList.Users {
+		if u.Name == "alice" {
+			aliceID = u.ID
+		}
+	}
+
+	noPolicy := send(t, a, http.MethodPost, "/v1/access-requests", operator,
+		`{"target_id":"`+targetID+`","principal":"deploy","reason":"incident 42"}`)
+	if noPolicy.Code != http.StatusForbidden {
+		t.Fatalf("a request was raised with no policy behind it: %d (%s)", noPolicy.Code, noPolicy.Body)
+	}
+
+	policy := send(t, a, http.MethodPost, "/v1/policies", admin,
+		`{"name":"ops-db","subject_kind":"role","subject_id":"operator","target_id":"`+
+			targetID+`","principals":["deploy"]}`)
+	if policy.Code != http.StatusCreated {
+		t.Fatalf("create policy: %d (%s)", policy.Code, policy.Body)
+	}
+
+	raised := send(t, a, http.MethodPost, "/v1/access-requests", operator,
+		`{"target_id":"`+targetID+`","principal":"deploy","reason":"incident 42","ttl":"2h"}`)
+	if raised.Code != http.StatusCreated {
+		t.Fatalf("raise request: %d (%s)", raised.Code, raised.Body)
+	}
+	requestID := decodeBody(t, raised)["id"].(string)
+
+	grantQuery := `{"user_id":"` + aliceID + `","target_id":"` + targetID + `","principal":"deploy"}`
+	pending := send(t, a, http.MethodPost, "/v1/access-requests/grant", admin, grantQuery)
+	if active, _ := decodeBody(t, pending)["active"].(bool); active {
+		t.Fatal("a pending request already granted access")
+	}
+
+	if rec := send(t, a, http.MethodPost, "/v1/access-requests/"+requestID+"/approve", operator, ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("an operator approved a request: %d", rec.Code)
+	}
+
+	approved := send(t, a, http.MethodPost, "/v1/access-requests/"+requestID+"/approve", admin, "")
+	if approved.Code != http.StatusOK {
+		t.Fatalf("approve: %d (%s)", approved.Code, approved.Body)
+	}
+
+	live := send(t, a, http.MethodPost, "/v1/access-requests/grant", admin, grantQuery)
+	body := decodeBody(t, live)
+	if active, _ := body["active"].(bool); !active {
+		t.Fatalf("no grant after approval: %s", live.Body)
+	}
+	if body["reason"] != "incident 42" {
+		t.Errorf("the grant does not carry the reason: %v", body["reason"])
+	}
+}
+
+func TestAnAdminCannotApproveItsOwnRequest(t *testing.T) {
+	a, admin := newTestAppWithAdmin(t)
+
+	created := send(t, a, http.MethodPost, "/v1/targets", admin,
+		`{"name":"db-1","address":"10.0.0.4","principals":["deploy"]}`)
+	targetID := decodeBody(t, created)["id"].(string)
+
+	if rec := send(t, a, http.MethodPost, "/v1/policies", admin,
+		`{"name":"admin-db","subject_kind":"role","subject_id":"admin","target_id":"`+
+			targetID+`","principals":["deploy"]}`); rec.Code != http.StatusCreated {
+		t.Fatalf("create policy: %d (%s)", rec.Code, rec.Body)
+	}
+
+	raised := send(t, a, http.MethodPost, "/v1/access-requests", admin,
+		`{"target_id":"`+targetID+`","principal":"deploy","reason":"just me"}`)
+	if raised.Code != http.StatusCreated {
+		t.Fatalf("raise: %d (%s)", raised.Code, raised.Body)
+	}
+	requestID := decodeBody(t, raised)["id"].(string)
+
+	rec := send(t, a, http.MethodPost, "/v1/access-requests/"+requestID+"/approve", admin, "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: the bootstrap admin approving its own request would make the gate decorative", rec.Code)
+	}
+	if code, _ := decodeBody(t, rec)["error"].(map[string]any)["code"].(string); code != "self_approval" {
+		t.Fatalf("code = %q, want self_approval", code)
+	}
+}
+
+func TestOneOperatorCannotSeeAnothersRequest(t *testing.T) {
+	a, admin := newTestAppWithAdmin(t)
+
+	created := send(t, a, http.MethodPost, "/v1/targets", admin,
+		`{"name":"db-1","address":"10.0.0.4","principals":["deploy"]}`)
+	targetID := decodeBody(t, created)["id"].(string)
+	send(t, a, http.MethodPost, "/v1/policies", admin,
+		`{"name":"ops-db","subject_kind":"role","subject_id":"operator","target_id":"`+
+			targetID+`","principals":["deploy"]}`)
+
+	alice := tokenForRole(t, a, admin, "alice", authz.RoleOperator)
+	bob := tokenForRole(t, a, admin, "bob", authz.RoleOperator)
+
+	raised := send(t, a, http.MethodPost, "/v1/access-requests", alice,
+		`{"target_id":"`+targetID+`","principal":"deploy","reason":"incident 42"}`)
+	requestID := decodeBody(t, raised)["id"].(string)
+
+	if rec := send(t, a, http.MethodGet, "/v1/access-requests/"+requestID, bob, ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: a 403 would confirm the id exists and leak who is asking for what", rec.Code)
+	}
+
+	list := send(t, a, http.MethodGet, "/v1/access-requests", bob, "")
+	if strings.Contains(list.Body.String(), requestID) {
+		t.Fatalf("bob's listing contains alice's request: %s", list.Body)
+	}
+}
+
+func TestARequesterIDInTheBodyIsRejected(t *testing.T) {
+	a, admin := newTestAppWithAdmin(t)
+
+	created := send(t, a, http.MethodPost, "/v1/targets", admin,
+		`{"name":"db-1","address":"10.0.0.4","principals":["deploy"]}`)
+	targetID := decodeBody(t, created)["id"].(string)
+
+	rec := send(t, a, http.MethodPost, "/v1/access-requests", admin,
+		`{"target_id":"`+targetID+`","principal":"deploy","reason":"r","requester_id":"usr-someone"}`)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: a caller must not be able to name the requester", rec.Code)
 	}
 }

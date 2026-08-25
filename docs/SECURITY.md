@@ -195,6 +195,48 @@ day the counter came round.
 **Writing policy is admin-only.** An operator who could write policy could grant itself any
 principal on any target, which makes the operator role equal to admin.
 
+## Just-in-time access
+
+Policy says what *may* be granted. An approved request is what makes it live. A session needs both,
+so a standing policy is a bound rather than an entitlement.
+
+**A request nobody could ever approve is refused when it is raised.** Policy is checked at create
+time using the requester's live identity. Without that check, an approver could rubber-stamp a
+request that policy forbids, and approval would become a way around policy rather than a gate in
+front of it.
+
+**Self-approval is impossible, including for admins.** The account that raised a request cannot
+approve *or deny* it, whatever role it holds. Denial is included deliberately: letting a requester
+close its own record would remove it from an approver's queue. The bootstrap admin is not an
+exception, which is why the platform is not usable as a single-person system without a second
+account — that is the point of the control, not an oversight.
+
+**Cancelling and denying are different acts by different people.** Only the requester may cancel;
+only a non-requesting admin may deny. An admin who cancels instead of denying leaves no decision
+record.
+
+**The requester comes from the token.** There is no field for it, and a body carrying `requester_id`
+is rejected outright by `DisallowUnknownFields`. This is invariant 4 in the one place it is easiest
+to get wrong.
+
+**One operator cannot see another's request, and the refusal is a 404.** A 403 would confirm the id
+exists, which leaks who is asking for access to what and when. Admins see everything, because they
+have to decide.
+
+**Expiry is derived from the clock, not stored as a state.** Nothing writes `expired` to a row. A
+pending request past its window and an approved request past its grant both report `expired` when
+read, and neither grants anything. There is no reaper job, so there is no reaper that can stop
+running and leave a live grant behind.
+
+**The grant lookup checks the clock twice.** The SQL filter compares RFC3339 strings so the index is
+usable, which is correct only while every timestamp is written as UTC. The parsed `time.Time` is
+then checked again in Go. A row stored with a `+07:00` offset sorts after a UTC string for the same
+instant and would otherwise read as unexpired — there is a test that writes exactly such a row and
+was confirmed to fail with the second check removed.
+
+**Two overlapping grants resolve to the longer one.** The query orders by expiry descending, so a
+later, longer approval extends access rather than being shadowed by an earlier short one.
+
 ## Bootstrap
 
 On a store with no users, the first start creates an `admin` user, issues it a token, and writes the

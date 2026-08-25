@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
@@ -34,6 +35,10 @@ func New(st *store.Store, log *slog.Logger, guard Guard, targets Targets) *Modul
 
 func (m *Module) Name() string {
 	return "policy"
+}
+
+func (m *Module) Authorize(ctx context.Context, id authz.Identity, targetID, principal string) error {
+	return m.service.Authorize(ctx, id, targetID, principal)
 }
 
 func (m *Module) Migrations() []store.Migration {

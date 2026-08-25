@@ -732,3 +732,181 @@ func TestPolicyDeleteConfirms(t *testing.T) {
 		t.Fatalf("output = %q, want a deletion confirmation", out)
 	}
 }
+
+func TestRequestCreateNeverSendsARequesterID(t *testing.T) {
+	var received map[string]any
+
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/access-requests" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		writeJSON(t, w, http.StatusCreated, requestView{
+			ID: "req-abc", RequesterID: "usr-abc", TargetID: "tgt-abc",
+			Principal: "deploy", Reason: "incident 42", State: "pending",
+		})
+	})
+
+	out, err := runAgainst(t, endpoint, "request", "create",
+		"--target", "tgt-abc", "--principal", "deploy", "--reason", "incident 42")
+	if err != nil {
+		t.Fatalf("unexpected error: %v (%s)", err, out)
+	}
+
+	for _, forbidden := range []string{"requester_id", "user_id", "requester"} {
+		if _, present := received[forbidden]; present {
+			t.Errorf("the client sent %q. The requester must come from the token, or a caller could raise a request as somebody else", forbidden)
+		}
+	}
+	if received["reason"] != "incident 42" {
+		t.Errorf("reason = %v", received["reason"])
+	}
+	if !strings.Contains(out, "req-abc") || !strings.Contains(out, "pending") {
+		t.Errorf("output does not show the raised request: %s", out)
+	}
+}
+
+func TestRequestCreateRequiresTargetPrincipalAndReason(t *testing.T) {
+	cases := map[string][]string{
+		"no target":    {"--principal", "deploy", "--reason", "r"},
+		"no principal": {"--target", "tgt-abc", "--reason", "r"},
+		"no reason":    {"--target", "tgt-abc", "--principal", "deploy"},
+	}
+
+	for label, args := range cases {
+		endpoint := fakeControlPlane(t, func(http.ResponseWriter, *http.Request) {
+			t.Errorf("%s: the control plane must not be called", label)
+		})
+		if _, err := runAgainst(t, endpoint, append([]string{"request", "create"}, args...)...); err == nil {
+			t.Errorf("%s: expected an error", label)
+		}
+	}
+}
+
+func TestRequestCreateOmitsAnUnsetTTL(t *testing.T) {
+	var received map[string]any
+
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		writeJSON(t, w, http.StatusCreated, requestView{ID: "req-abc", State: "pending"})
+	})
+
+	if _, err := runAgainst(t, endpoint, "request", "create",
+		"--target", "tgt-abc", "--principal", "deploy", "--reason", "r"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, present := received["ttl"]; present {
+		t.Error("ttl was sent unset, bypassing the platform default")
+	}
+}
+
+func TestRequestDecisionsPostToTheRightSubpath(t *testing.T) {
+	for _, verb := range []string{"approve", "deny", "cancel"} {
+		var path string
+
+		endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+			path = r.Method + " " + r.URL.Path
+			writeJSON(t, w, http.StatusOK, requestView{ID: "req-abc", State: verb})
+		})
+
+		if _, err := runAgainst(t, endpoint, "request", verb, "req-abc"); err != nil {
+			t.Fatalf("%s: unexpected error: %v", verb, err)
+		}
+		if want := "POST /v1/access-requests/req-abc/" + verb; path != want {
+			t.Errorf("%s: request = %q, want %q", verb, path, want)
+		}
+	}
+}
+
+func TestRequestDecisionsRequireAnID(t *testing.T) {
+	for _, verb := range []string{"approve", "deny", "cancel", "get"} {
+		endpoint := fakeControlPlane(t, func(http.ResponseWriter, *http.Request) {
+			t.Errorf("%s: the control plane must not be called without an id", verb)
+		})
+		if _, err := runAgainst(t, endpoint, "request", verb); err == nil {
+			t.Errorf("%s: expected an error", verb)
+		}
+	}
+}
+
+func TestSelfApprovalIsReportedClearly(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		if _, err := w.Write([]byte(
+			`{"error":{"code":"self_approval","message":"a request cannot be decided by the account that raised it"}}`)); err != nil {
+			t.Errorf("write: %v", err)
+		}
+	})
+
+	_, err := runAgainst(t, endpoint, "request", "approve", "req-abc")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "self_approval") {
+		t.Fatalf("error = %q, want the self_approval code", err)
+	}
+}
+
+func TestRequestListRendersATable(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, requestListView{Requests: []requestView{
+			{ID: "req-abc", State: "approved", RequesterID: "usr-abc", TargetID: "tgt-abc",
+				Principal: "deploy", Reason: "incident 42", GrantExpires: "2026-08-25T12:00:00Z"},
+		}})
+	})
+
+	out, err := runAgainst(t, endpoint, "request", "list")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{"STATE", "GRANT EXPIRES", "approved", "incident 42"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRequestGrantReportsInactiveWithoutInventingFields(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if want := "/v1/access-requests/grant"; r.URL.Path != want {
+			t.Errorf("path = %q, want %q", r.URL.Path, want)
+		}
+		writeJSON(t, w, http.StatusOK, grantView{Active: false})
+	})
+
+	out, err := runAgainst(t, endpoint, "request", "grant",
+		"--user", "usr-abc", "--target", "tgt-abc", "--principal", "deploy")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "active:  false") {
+		t.Fatalf("output = %q, want the verdict", out)
+	}
+	if strings.Contains(out, "expires:") {
+		t.Fatalf("an inactive grant printed an expiry: %s", out)
+	}
+}
+
+func TestRequestGrantShowsTheReasonWhenActive(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, grantView{
+			Active: true, RequestID: "req-abc",
+			ExpiresAt: "2026-08-25T12:00:00Z", Reason: "incident 42",
+		})
+	})
+
+	out, err := runAgainst(t, endpoint, "request", "grant",
+		"--user", "usr-abc", "--target", "tgt-abc", "--principal", "deploy")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{"active:  true", "req-abc", "incident 42"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q: %s", want, out)
+		}
+	}
+}

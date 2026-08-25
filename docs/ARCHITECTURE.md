@@ -166,7 +166,7 @@ system      health, version                                        done
 target      the SSH target inventory                               done
 identity    users, roles, API tokens                               done
 policy      who may reach which target as which principal          done
-approval    JIT request, approve, time-boxed grant
+approval    JIT request, approve, time-boxed grant                 done
 session     the live session record and the kill switch
 audit       the append-only event trail and the recording index
 ```
