@@ -27,9 +27,14 @@ data plane      the protocol proxy
                 records the stream, holds no state after the session ends
 ```
 
-Both live in the same binary today, started by different subcommands. They are separated in the
-source tree because the day one of them needs to run somewhere else, the boundary must already be
-a network boundary rather than a function call.
+Both live in the same binary and the same process today, on two listeners: `--listen` for HTTP and
+`--ssh-listen` for SSH. The SSH listener is off unless asked for, because a security product should
+not open a port by default.
+
+They are separated in the source tree, and `internal/dataplane` reaches the control plane only
+through interfaces it declares itself. That set of interfaces is the seam: the day the planes need
+to run on different hosts, it becomes a network boundary rather than a refactor.
+`TestDataPlaneDoesNotImportPlatformOrApp` keeps it that way.
 
 ## Layers
 
@@ -170,6 +175,24 @@ approval    JIT request, approve, time-boxed grant                 done
 session     the live session record and the kill switch
 audit       the append-only event trail and the recording index
 ```
+
+The data plane lives in `internal/dataplane/sshd`. It answers four questions in order, and any one
+of them failing ends the session:
+
+```
+1. which identity does this public key belong to?      Identities.ByPublicKey
+2. which target does "principal:target" name?          TargetLookup
+3. is that within policy?                              Policies.Authorize
+4. is it approved right now?                           Grants.HasGrant
+```
+
+Only the first runs during the SSH handshake. The rest run when the session channel opens, so a
+caller who has proved who they are can be told which check refused them.
+
+The one seam that needs a shape conversion — the target lookup — is a function type rather than an
+interface, and `app` supplies a closure that converts `target.Target` into `sshd.Target`. Adapting
+between two modules' types is the composition root's job, and it keeps both modules ignorant of
+each other.
 
 ## Authorization
 

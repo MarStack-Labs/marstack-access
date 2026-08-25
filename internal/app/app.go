@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/dataplane/sshd"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
 	"github.com/marstack-labs/marstack-access/internal/platform/approval"
@@ -34,6 +35,7 @@ const bootstrapTokenFile = "bootstrap-token"
 
 type Config struct {
 	Listen         string
+	SSHListen      string
 	DataDir        string
 	RequestTimeout time.Duration
 }
@@ -58,6 +60,7 @@ type App struct {
 	modules []Module
 	router  http.Handler
 	http    *http.Server
+	sshd    *sshd.Server
 }
 
 func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
@@ -80,12 +83,14 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	targets := target.New(st, log, guard)
 	policies := policy.New(st, log, guard, targets)
 
+	grants := approval.New(st, log, guard, policies)
+
 	a.modules = []Module{
 		system.New(st, log, guard),
 		idm,
 		targets,
 		policies,
-		approval.New(st, log, guard, policies),
+		grants,
 	}
 
 	if err := a.migrate(ctx); err != nil {
@@ -96,6 +101,16 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	if err := a.bootstrap(ctx); err != nil {
 		st.Close()
 		return nil, err
+	}
+
+	if cfg.SSHListen != "" {
+		a.sshd, err = sshd.New(
+			sshd.Config{Listen: cfg.SSHListen, DataDir: cfg.DataDir},
+			log, idm, targetLookup(targets), policies, grants)
+		if err != nil {
+			st.Close()
+			return nil, err
+		}
 	}
 
 	a.router = a.buildRouter()
@@ -110,6 +125,22 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	}
 
 	return a, nil
+}
+
+func targetLookup(targets *target.Module) sshd.TargetLookup {
+	return func(ctx context.Context, name string) (sshd.Target, error) {
+		t, err := targets.ByName(ctx, name)
+		if err != nil {
+			return sshd.Target{}, err
+		}
+		return sshd.Target{
+			ID:         t.ID,
+			Name:       t.Name,
+			Address:    t.Address,
+			Port:       t.Port,
+			Principals: t.Principals,
+		}, nil
+	}
 }
 
 func (a *App) Close() error {
@@ -172,7 +203,10 @@ func (a *App) Handler() http.Handler {
 }
 
 func (a *App) Run(ctx context.Context) error {
-	errc := make(chan error, 1)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errc := make(chan error, 2)
 	go func() {
 		a.log.Info("control plane listening", "addr", a.cfg.Listen, "modules", len(a.modules))
 		err := a.http.ListenAndServe()
@@ -181,6 +215,10 @@ func (a *App) Run(ctx context.Context) error {
 		}
 		errc <- err
 	}()
+
+	if a.sshd != nil {
+		go func() { errc <- a.sshd.Run(ctx) }()
+	}
 
 	select {
 	case err := <-errc:

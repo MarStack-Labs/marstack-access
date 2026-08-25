@@ -33,6 +33,10 @@ func (m *Module) Name() string {
 	return "target"
 }
 
+func (m *Module) ByName(ctx context.Context, name string) (Target, error) {
+	return m.service.getByName(ctx, name)
+}
+
 func (m *Module) Principals(ctx context.Context, targetID string) ([]string, error) {
 	t, err := m.service.get(ctx, targetID)
 	if err != nil {

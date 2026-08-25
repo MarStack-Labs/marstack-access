@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -37,6 +38,10 @@ func New(st *store.Store, log *slog.Logger, guard Guard, policies Policies) *Mod
 
 func (m *Module) Name() string {
 	return "approval"
+}
+
+func (m *Module) HasGrant(ctx context.Context, userID, targetID, principal string) error {
+	return m.service.HasGrant(ctx, userID, targetID, principal)
 }
 
 func (m *Module) Migrations() []store.Migration {

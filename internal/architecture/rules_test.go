@@ -170,6 +170,33 @@ func TestCommandOnlyWiresTheCLI(t *testing.T) {
 	}
 }
 
+func TestDataPlaneDoesNotImportPlatformOrApp(t *testing.T) {
+	for _, f := range loadSources(t) {
+		if !strings.HasPrefix(f.pkg, "internal/dataplane/") {
+			continue
+		}
+		for _, imp := range f.imports {
+			if strings.HasPrefix(imp, "internal/platform/") || imp == "internal/app" || imp == "internal/store" {
+				t.Errorf("%s imports %s: the data plane reaches the control plane through interfaces it declares, "+
+					"because that seam becomes a network boundary the day the planes are split", f.path, imp)
+			}
+		}
+	}
+}
+
+func TestPlatformDoesNotImportTheDataPlane(t *testing.T) {
+	for _, f := range loadSources(t) {
+		if _, ok := platformModuleOf(f.pkg); !ok {
+			continue
+		}
+		for _, imp := range f.imports {
+			if strings.HasPrefix(imp, "internal/dataplane/") {
+				t.Errorf("%s imports %s: a control plane module must not depend on the thing that calls it", f.path, imp)
+			}
+		}
+	}
+}
+
 func TestEveryPlatformRouteDeclaresWhoMayCallIt(t *testing.T) {
 	root := repoRoot(t)
 	fset := token.NewFileSet()

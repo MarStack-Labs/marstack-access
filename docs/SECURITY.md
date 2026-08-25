@@ -269,6 +269,47 @@ and the fix was to remove the file open rather than annotate it — an exclusion
 the CLI would also hide a real traversal bug in server code later. Piping is also the better Unix
 design: the key can come from a file, a clipboard, or `ssh-add -L`.
 
+## The SSH front door
+
+A user connects with `ssh <principal>:<target>@gateway` and no client software. The gateway
+authenticates the public key, resolves the destination, and runs policy and grant checks before any
+target is touched.
+
+**Only the key check happens during the handshake.** An unregistered key gets `Permission denied
+(publickey)` and learns nothing about what exists. Everything after that runs when the session
+channel opens, and the reason is written to the client's stderr — the same 401-versus-403 reasoning
+as the HTTP API. Someone who has proved who they are gains nothing dangerous from being told which
+check refused them, and a blank refusal is what makes people ask for broader access than they need.
+
+**Port forwarding is refused, in both directions and at both layers.** `tcpip-forward` global
+requests are answered false, and `direct-tcpip` channels are rejected as `administratively
+prohibited`. A gateway that forwards ports is a route into the network that no policy describes and
+no recording captures. Verified with a real OpenSSH client: `ssh -R` fails at setup, and `ssh -L`
+binds locally as OpenSSH always does but the channel dies on first use with `only session channels
+are permitted`.
+
+**Agent forwarding, X11, and subsystems are refused.** `auth-agent-req@openssh.com` is the important
+one: forwarding an agent into a session lets whatever is on the far side reuse every other key the
+user holds. `subsystem` covers sftp, which would be file transfer with no recording.
+
+**Refusing everything is not safer than refusing the right things.** The first version rejected every
+session request including `shell`, which meant a refused user saw an empty EOF instead of a reason.
+`shell`, `exec`, `pty-req`, `env`, and `window-change` are accepted because they are how a terminal
+is set up; the capability grants above are what get refused.
+
+**A session that never starts is closed.** If no `shell` or `exec` arrives within the start timeout,
+the channel is dropped rather than held open.
+
+**The handshake is on a deadline; the session is not.** An unauthenticated peer gets 30 seconds and
+three auth attempts. The deadline is cleared once the handshake completes, because an interactive
+shell is legitimately idle for long stretches — the unauthenticated phase is the part an attacker
+controls.
+
+**The host key is generated once, at mode 0600, and a corrupt one is a hard failure.** Silently
+generating a replacement would invalidate every client's stored key at the same moment, which is
+indistinguishable from a man-in-the-middle and teaches operators to click through the warning. The
+fingerprint is logged at startup so it can be pinned.
+
 ## Bootstrap
 
 On a store with no users, the first start creates an `admin` user, issues it a token, and writes the

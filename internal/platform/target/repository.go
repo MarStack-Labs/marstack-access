@@ -141,3 +141,28 @@ func (r *repository) delete(ctx context.Context, id string) (bool, error) {
 	}
 	return affected > 0, nil
 }
+
+func (r *repository) getByName(ctx context.Context, name string) (Target, error) {
+	var (
+		t         Target
+		createdAt string
+	)
+
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, name, address, port, created_at FROM targets WHERE name = ?`, name,
+	).Scan(&t.ID, &t.Name, &t.Address, &t.Port, &createdAt)
+	if err != nil {
+		return Target{}, err
+	}
+
+	t.CreatedAt, err = time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return Target{}, fmt.Errorf("parse created_at: %w", err)
+	}
+
+	t.Principals, err = r.principalsOf(ctx, t.ID)
+	if err != nil {
+		return Target{}, err
+	}
+	return t, nil
+}

@@ -129,3 +129,18 @@ func (s *service) checkID(id string) error {
 func notFound() error {
 	return fault.NotFound("target_not_found", "no target with that id is registered")
 }
+
+func (s *service) getByName(ctx context.Context, name string) (Target, error) {
+	if err := validate.Name("name", name); err != nil {
+		return Target{}, err
+	}
+
+	t, err := s.repo.getByName(ctx, name)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return Target{}, fault.NotFound("target_not_found", "no target with that name is registered")
+	case err != nil:
+		return Target{}, fault.Internal(err)
+	}
+	return t, nil
+}

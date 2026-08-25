@@ -186,6 +186,39 @@ belong to only one account, and `ssh-dss` and RSA under 2048 bits are refused wh
 rather than when a session fails. A key carries no privilege of its own — the account's role and
 policies decide everything.
 
+## Connecting
+
+Start the SSH data plane alongside the control plane. It is off unless asked for:
+
+```sh
+marac server --ssh-listen 127.0.0.1:2222
+```
+
+Then connect with a plain `ssh` client. The username carries where you are going:
+
+```sh
+ssh -p 2222 deploy:db-1@gateway
+```
+
+```
+marstack-access: authorized
+  user       alice (operator)
+  target     db-1 at 10.0.0.4:22
+  principal  deploy
+```
+
+An unregistered key gets `Permission denied (publickey)` and learns nothing about what exists.
+Anything refused after that — unknown target, a principal the host does not accept, no policy, no
+grant — says which check refused it, because a caller who has proved who they are gains nothing from
+a blank refusal.
+
+Port forwarding is refused in both directions, and so are agent forwarding, X11, and subsystems. A
+gateway that forwards ports is a route into the network that no policy describes and no recording
+captures.
+
+The target connection itself is not implemented yet: an authorized session reports what it resolved
+and closes.
+
 The client talks to `$MARAC_ENDPOINT`, or `--endpoint`, or loopback. `--output json` prints the raw
 API response for scripting:
 

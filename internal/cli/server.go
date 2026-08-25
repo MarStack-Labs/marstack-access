@@ -13,9 +13,10 @@ import (
 
 func newServerCmd() *cobra.Command {
 	var (
-		listen   string
-		dataDir  string
-		logLevel string
+		listen    string
+		sshListen string
+		dataDir   string
+		logLevel  string
 	)
 
 	cmd := &cobra.Command{
@@ -28,7 +29,11 @@ func newServerCmd() *cobra.Command {
 
 			log := logging.New(logLevel, os.Stderr)
 
-			a, err := app.New(ctx, app.Config{Listen: listen, DataDir: dataDir}, log)
+			a, err := app.New(ctx, app.Config{
+				Listen:    listen,
+				SSHListen: sshListen,
+				DataDir:   dataDir,
+			}, log)
 			if err != nil {
 				return err
 			}
@@ -39,6 +44,8 @@ func newServerCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:7443", "address the control plane listens on")
+	cmd.Flags().StringVar(&sshListen, "ssh-listen", "",
+		"address the SSH data plane listens on, empty to leave it off")
 	cmd.Flags().StringVar(&dataDir, "data-dir", "./data", "directory holding the control plane database")
 	cmd.Flags().StringVar(&logLevel, "log-level", "info", "log level: debug, info, warn, error")
 
