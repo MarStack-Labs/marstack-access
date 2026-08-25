@@ -2,6 +2,8 @@ package target
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
@@ -56,6 +58,12 @@ func (m *Module) handleRegister(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
+	m.emit(r.Context(), "target.registered", t.ID, map[string]string{
+		"name":       t.Name,
+		"address":    t.Address,
+		"principals": strings.Join(t.Principals, ","),
+	})
+
 	httpx.Write(w, http.StatusCreated, viewOf(t))
 	return nil
 }
@@ -90,6 +98,8 @@ func (m *Module) handleDelete(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
+	m.emit(r.Context(), "target.deleted", r.PathValue("id"), nil)
+
 	httpx.Write(w, http.StatusNoContent, nil)
 	return nil
 }
@@ -104,6 +114,12 @@ func (m *Module) handleTrust(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+
+	m.emit(r.Context(), "target.host_key_pinned", t.ID, map[string]string{
+		"name":        t.Name,
+		"fingerprint": t.Fingerprint,
+		"replaced":    strconv.FormatBool(req.Replace),
+	})
 
 	httpx.Write(w, http.StatusOK, viewOf(t))
 	return nil

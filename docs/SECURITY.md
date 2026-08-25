@@ -469,7 +469,46 @@ investigator. A trail as uniform as the refusal would hide someone probing host 
 **Retention is not this platform's job.** Sinks can only append. Deciding how long events live
 belongs to whatever stores them, and a process that can shorten its own trail does not have one.
 
+### What is recorded
+
+Every state change in the control plane, every access decision in the data plane, and every refusal
+at the API boundary:
+
+```
+api.denied                 target.registered        request.raised
+ssh.authentication         target.deleted           request.approved
+session.opened             target.host_key_pinned   request.denied
+session.refused            policy.created           request.cancelled
+session.closed             policy.deleted           user.created / deleted
+session.killed             key.added / removed      token.issued / revoked
+```
+
+**Reads are not recorded.** Listing targets, reading a session, and asking `policy evaluate` a
+hypothetical leave nothing behind. The trail records what changed and what was decided; recording
+every read would bury those under traffic, and the thing an investigator needs is the small set of
+events that granted or refused access.
+
+**Allowed API calls are not recorded by the guard either.** A module records what it changed, so an
+allowed mutation is already in the trail with its detail. Recording the call as well would double
+every event and add nothing.
+
+**Refusals are recorded with an actor only when there is one.** A 403 names the caller, because they
+proved who they are. A 401 does not, because nothing was proved — putting a name against an
+unauthenticated attempt would attribute it to whoever the token claimed to be.
+
+**A token secret is never in the trail.** `token.issued` carries the token id and the selector — the
+non-secret handle the design exists to provide. The trail is written to disk and shipped off host, so
+a secret in it is a secret in two more places. There is a test asserting the issued secret does not
+appear in the event.
+
 ### What is not covered yet
+
+**Control plane events are written after the change is committed.** A crash between the database
+commit and the audit write loses the event while keeping the change. Writing the event first would
+record changes that never happened, and putting it in the same SQLite transaction would mean keeping
+the trail in the database — which is the thing an attacker who owns the host can edit. The session
+path does not have this problem: its row and its recording are both opened before the target is
+touched, so the ordering there refuses rather than loses.
 
 Recordings are still local files. Invariant 8 says recordings go to object storage under an object
 lock, and that half is not built: `./data/recordings` is deletable by root on the gateway. The event

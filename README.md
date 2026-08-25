@@ -264,11 +264,27 @@ marac session get ses-xxxxxxxxxxxxx      # includes where the recording is
 marac session kill ses-xxxxxxxxxxxxx     # admin only
 ```
 
-Every decision lands in the audit trail at `./data/audit/audit.jsonl`, and ships to Loki when asked:
+Every change and every decision lands in the audit trail at `./data/audit/audit.jsonl`, and ships to
+Loki when asked:
 
 ```sh
 marac server --audit-loki-url http://loki:3100
 ```
+
+```
+target.registered          allowed  admin    tgt-cgrne5bf33bct
+target.host_key_pinned     allowed  admin    tgt-cgrne5bf33bct
+user.created               allowed  admin    usr-k8fr3y3btzsat
+token.issued               allowed  admin    tok-86gxy0v1zrxna
+policy.created             allowed  admin    pol-w0hkcdx1zgng8
+request.raised             allowed  alice    req-7b6q3sjrrff8w
+request.approved           allowed  admin    req-7b6q3sjrrff8w
+api.denied                 denied   alice    insufficient_role
+api.denied                 denied   -        missing_token
+```
+
+A requester and an approver are different accounts in the trail, which is what self-approval being
+impossible looks like from the outside. Reads are not recorded, and a token secret never is.
 
 Without that flag the trail stays on the host, which the log warns about — a trail root can delete is
 durable against a crash but not against whoever owns the machine. Shipping never fails a session: if

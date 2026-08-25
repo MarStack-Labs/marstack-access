@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
 	"github.com/marstack-labs/marstack-access/internal/store"
@@ -18,13 +19,19 @@ type Guard interface {
 type Module struct {
 	service *service
 	guard   Guard
+	trail   audit.Trail
 	log     *slog.Logger
 }
 
-func New(st *store.Store, log *slog.Logger, guard Guard) *Module {
+func New(st *store.Store, log *slog.Logger, guard Guard, trail audit.Trail) *Module {
+	if trail == nil {
+		trail = audit.Discard()
+	}
+
 	return &Module{
 		service: &service{repo: &repository{db: st.DB()}, now: time.Now},
 		guard:   guard,
+		trail:   trail,
 		log:     log,
 	}
 }
@@ -101,4 +108,12 @@ func (m *Module) Bootstrap(ctx context.Context) (string, error) {
 
 func (m *Module) Authenticate(ctx context.Context, secret string) (authz.Identity, error) {
 	return m.service.authenticate(ctx, secret)
+}
+
+func (m *Module) emit(ctx context.Context, action, object string, fields map[string]string) {
+	authz.Emit(ctx, m.trail, m.log, audit.Event{
+		Action: action,
+		Object: object,
+		Fields: fields,
+	})
 }

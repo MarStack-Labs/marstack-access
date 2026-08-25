@@ -8,12 +8,15 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 	"github.com/marstack-labs/marstack-access/internal/kernel/logging"
@@ -38,13 +41,14 @@ func (c *clock) now() time.Time {
 func newTestModule(t *testing.T) (*Module, *clock) {
 	t.Helper()
 
+	trail := &recordingTrail{}
 	st, err := store.Open(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
 
-	m := New(st, logging.New("error", io.Discard), passThroughGuard{})
+	m := New(st, logging.New("error", io.Discard), passThroughGuard{}, trail)
 	if err := st.Migrate(context.Background(), m.Migrations()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -609,5 +613,141 @@ func TestAFreshKeyGrantsNoAccessByItself(t *testing.T) {
 	}
 	if id.Role != authz.RoleViewer {
 		t.Fatalf("role = %q, want the user's own role: registering a key must not change what the account may do", id.Role)
+	}
+}
+
+type recordingTrail struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (r *recordingTrail) Record(_ context.Context, e audit.Event) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.events = append(r.events, e)
+	return nil
+}
+
+func (r *recordingTrail) find(action string) (audit.Event, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, e := range r.events {
+		if e.Action == action {
+			return e, true
+		}
+	}
+	return audit.Event{}, false
+}
+
+func newTestModuleWithTrail(t *testing.T) (*Module, *recordingTrail) {
+	t.Helper()
+
+	st, err := store.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	trail := &recordingTrail{}
+	m := New(st, logging.New("error", io.Discard), passThroughGuard{}, trail)
+	if err := st.Migrate(context.Background(), m.Migrations()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return m, trail
+}
+
+func TestIdentityChangesLandInTheTrail(t *testing.T) {
+	m, trail := newTestModuleWithTrail(t)
+	ctx := context.Background()
+
+	u, err := m.service.createUser(ctx, CreateUserInput{Name: "alice", Role: authz.RoleOperator})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	m.Routes(mux)
+
+	send := func(method, path, body string) *httptest.ResponseRecorder {
+		var reader io.Reader
+		if body != "" {
+			reader = strings.NewReader(body)
+		}
+		r := httptest.NewRequest(method, path, reader)
+		if body != "" {
+			r.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, r)
+		return rec
+	}
+
+	issued := send(http.MethodPost, "/v1/users/"+u.ID+"/tokens", "")
+	if issued.Code != http.StatusCreated {
+		t.Fatalf("issue token: %d (%s)", issued.Code, issued.Body)
+	}
+
+	var view issuedTokenView
+	if err := json.Unmarshal(issued.Body.Bytes(), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	event, ok := trail.find("token.issued")
+	if !ok {
+		t.Fatal("issuing a token left no audit event")
+	}
+	if event.Object != view.ID {
+		t.Errorf("object = %q, want the token id %q", event.Object, view.ID)
+	}
+
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+	if strings.Contains(string(encoded), view.Secret) {
+		t.Fatalf("the audit event carries the token secret. The trail is written to disk and shipped off host, so a secret in it is a secret in two more places: %s",
+			encoded)
+	}
+	if !strings.Contains(string(encoded), view.Selector) {
+		t.Error("the event carries no selector, so the trail cannot name which token was issued")
+	}
+}
+
+func TestAddingAKeyRecordsItsFingerprint(t *testing.T) {
+	m, trail := newTestModuleWithTrail(t)
+	ctx := context.Background()
+
+	u, err := m.service.createUser(ctx, CreateUserInput{Name: "alice", Role: authz.RoleOperator})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	m.Routes(mux)
+
+	raw := strings.TrimSpace(generateKey(t))
+	body := `{"name":"laptop","public_key":"` + raw + `"}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/users/"+u.ID+"/keys", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("add key: %d (%s)", rec.Code, rec.Body)
+	}
+
+	event, ok := trail.find("key.added")
+	if !ok {
+		t.Fatal("adding a key left no audit event")
+	}
+	parsed, err := sshkey.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if event.Fields["fingerprint"] != parsed.Fingerprint {
+		t.Fatalf("fingerprint = %q, want %q: without it the trail cannot say which key was trusted",
+			event.Fields["fingerprint"], parsed.Fingerprint)
 	}
 }

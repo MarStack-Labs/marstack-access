@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
 	"github.com/marstack-labs/marstack-access/internal/store"
@@ -18,10 +19,15 @@ type Guard interface {
 type Module struct {
 	service *service
 	guard   Guard
+	trail   audit.Trail
 	log     *slog.Logger
 }
 
-func New(st *store.Store, log *slog.Logger, guard Guard, targets Targets) *Module {
+func New(st *store.Store, log *slog.Logger, guard Guard, targets Targets, trail audit.Trail) *Module {
+	if trail == nil {
+		trail = audit.Discard()
+	}
+
 	return &Module{
 		service: &service{
 			repo:    &repository{db: st.DB()},
@@ -29,6 +35,7 @@ func New(st *store.Store, log *slog.Logger, guard Guard, targets Targets) *Modul
 			now:     time.Now,
 		},
 		guard: guard,
+		trail: trail,
 		log:   log,
 	}
 }
@@ -73,4 +80,12 @@ func (m *Module) Routes(mux *http.ServeMux) {
 		m.guard.Require(authz.RoleAdmin, httpx.Wrap(m.log, m.handleDelete)))
 	mux.Handle("POST /v1/policies/evaluate",
 		m.guard.Require(authz.RoleAdmin, httpx.Wrap(m.log, m.handleEvaluate)))
+}
+
+func (m *Module) emit(ctx context.Context, action, object string, fields map[string]string) {
+	authz.Emit(ctx, m.trail, m.log, audit.Event{
+		Action: action,
+		Object: object,
+		Fields: fields,
+	})
 }

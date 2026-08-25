@@ -80,6 +80,8 @@ func (m *Module) handleCreateUser(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 
+	m.emit(r.Context(), "user.created", u.ID, map[string]string{"name": u.Name, "role": u.Role})
+
 	httpx.Write(w, http.StatusCreated, userViewOf(u))
 	return nil
 }
@@ -114,6 +116,8 @@ func (m *Module) handleDeleteUser(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 
+	m.emit(r.Context(), "user.deleted", r.PathValue("id"), nil)
+
 	httpx.Write(w, http.StatusNoContent, nil)
 	return nil
 }
@@ -128,6 +132,11 @@ func (m *Module) handleIssueToken(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
+
+	m.emit(r.Context(), "token.issued", t.ID, map[string]string{
+		"user":     t.UserID,
+		"selector": t.Selector,
+	})
 
 	httpx.Write(w, http.StatusCreated, issuedTokenView{
 		tokenView: tokenViewOf(t),
@@ -176,6 +185,8 @@ func (m *Module) handleRevokeToken(w http.ResponseWriter, r *http.Request) error
 		return err
 	}
 
+	m.emit(r.Context(), "token.revoked", r.PathValue("id"), nil)
+
 	httpx.Write(w, http.StatusNoContent, nil)
 	return nil
 }
@@ -220,6 +231,13 @@ func (m *Module) handleAddKey(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
+	m.emit(r.Context(), "key.added", k.ID, map[string]string{
+		"user":        k.UserID,
+		"name":        k.Name,
+		"type":        k.Type,
+		"fingerprint": k.Fingerprint,
+	})
+
 	httpx.Write(w, http.StatusCreated, keyViewOf(k))
 	return nil
 }
@@ -243,6 +261,8 @@ func (m *Module) handleRemoveKey(w http.ResponseWriter, r *http.Request) error {
 	if err := m.service.removeKey(r.Context(), r.PathValue("id")); err != nil {
 		return err
 	}
+
+	m.emit(r.Context(), "key.removed", r.PathValue("id"), nil)
 
 	httpx.Write(w, http.StatusNoContent, nil)
 	return nil

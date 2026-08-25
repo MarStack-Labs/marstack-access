@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
@@ -105,6 +106,13 @@ func (m *Module) handleCreate(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
+	m.emit(r.Context(), "request.raised", req.ID, map[string]string{
+		"target":    req.TargetID,
+		"principal": req.Principal,
+		"reason":    req.Reason,
+		"grant_ttl": req.GrantTTL.String(),
+	})
+
 	httpx.Write(w, http.StatusCreated, m.viewOf(req))
 	return nil
 }
@@ -156,20 +164,21 @@ func (m *Module) handleGet(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (m *Module) handleApprove(w http.ResponseWriter, r *http.Request) error {
-	return m.decide(w, r, m.service.approve)
+	return m.decide(w, r, m.service.approve, "request.approved", audit.OutcomeAllowed)
 }
 
 func (m *Module) handleDeny(w http.ResponseWriter, r *http.Request) error {
-	return m.decide(w, r, m.service.deny)
+	return m.decide(w, r, m.service.deny, "request.denied", audit.OutcomeDenied)
 }
 
 func (m *Module) handleCancel(w http.ResponseWriter, r *http.Request) error {
-	return m.decide(w, r, m.service.cancel)
+	return m.decide(w, r, m.service.cancel, "request.cancelled", audit.OutcomeDenied)
 }
 
 type decider func(ctx context.Context, caller authz.Identity, id string) (Request, error)
 
-func (m *Module) decide(w http.ResponseWriter, r *http.Request, fn decider) error {
+func (m *Module) decide(w http.ResponseWriter, r *http.Request, fn decider,
+	action, outcome string) error {
 	caller, err := callerOf(r)
 	if err != nil {
 		return err
@@ -179,6 +188,19 @@ func (m *Module) decide(w http.ResponseWriter, r *http.Request, fn decider) erro
 	if err != nil {
 		return err
 	}
+
+	authz.Emit(r.Context(), m.trail, m.log, audit.Event{
+		Action:  action,
+		Outcome: outcome,
+		Object:  req.ID,
+		Reason:  req.Reason,
+		Fields: map[string]string{
+			"requester": req.RequesterID,
+			"target":    req.TargetID,
+			"principal": req.Principal,
+			"expires":   req.GrantExpiresAt.UTC().Format(time.RFC3339),
+		},
+	})
 
 	httpx.Write(w, http.StatusOK, m.viewOf(req))
 	return nil

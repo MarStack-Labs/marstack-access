@@ -2,6 +2,7 @@ package policy
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
@@ -65,6 +66,13 @@ func (m *Module) handleCreate(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
+	m.emit(r.Context(), "policy.created", p.ID, map[string]string{
+		"name":       p.Name,
+		"subject":    p.SubjectKind + ":" + p.SubjectID,
+		"target":     p.TargetID,
+		"principals": strings.Join(p.Principals, ","),
+	})
+
 	httpx.Write(w, http.StatusCreated, viewOf(p))
 	return nil
 }
@@ -98,6 +106,8 @@ func (m *Module) handleDelete(w http.ResponseWriter, r *http.Request) error {
 	if err := m.service.remove(r.Context(), r.PathValue("id")); err != nil {
 		return err
 	}
+
+	m.emit(r.Context(), "policy.deleted", r.PathValue("id"), nil)
 
 	httpx.Write(w, http.StatusNoContent, nil)
 	return nil

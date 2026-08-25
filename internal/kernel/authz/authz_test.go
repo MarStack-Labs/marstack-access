@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 )
 
@@ -20,7 +22,7 @@ func discardLogger() *slog.Logger {
 func guardFor(id Identity, err error) *Guard {
 	return New(AuthenticatorFunc(func(context.Context, string) (Identity, error) {
 		return id, err
-	}), discardLogger())
+	}), discardLogger(), nil)
 }
 
 func call(t *testing.T, h http.Handler, header string) *httptest.ResponseRecorder {
@@ -208,5 +210,109 @@ func TestRolesListsEveryRankedRole(t *testing.T) {
 		if _, ok := ranks[role]; !ok {
 			t.Errorf("Roles() offers %q which has no rank", role)
 		}
+	}
+}
+
+type recordingTrail struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (r *recordingTrail) Record(_ context.Context, e audit.Event) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.events = append(r.events, e)
+	return nil
+}
+
+func (r *recordingTrail) all() []audit.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]audit.Event{}, r.events...)
+}
+
+func guardWithTrail(id Identity, err error, trail audit.Trail) *Guard {
+	return New(AuthenticatorFunc(func(context.Context, string) (Identity, error) {
+		return id, err
+	}), discardLogger(), trail)
+}
+
+func TestEveryRefusalLandsInTheTrail(t *testing.T) {
+	cases := map[string]struct {
+		identity Identity
+		authErr  error
+		header   string
+		reason   string
+	}{
+		"no token":          {identity: Identity{Role: RoleAdmin}, header: "", reason: "missing_token"},
+		"unknown token":     {authErr: InvalidToken(), header: "Bearer mat_a_b", reason: "invalid_token"},
+		"insufficient role": {identity: Identity{UserID: "usr-abc", Name: "alice", Role: RoleViewer}, header: "Bearer mat_a_b", reason: "insufficient_role"},
+	}
+
+	for label, c := range cases {
+		trail := &recordingTrail{}
+		guard := guardWithTrail(c.identity, c.authErr, trail)
+
+		call(t, guard.Require(RoleAdmin, okHandler(nil)), c.header)
+
+		events := trail.all()
+		if len(events) != 1 {
+			t.Errorf("%s: %d events, want 1", label, len(events))
+			continue
+		}
+
+		e := events[0]
+		if e.Action != "api.denied" || e.Outcome != audit.OutcomeDenied {
+			t.Errorf("%s: event = %+v", label, e)
+		}
+		if e.Reason != c.reason {
+			t.Errorf("%s: reason = %q, want %q", label, e.Reason, c.reason)
+		}
+		if e.Fields["required"] != RoleAdmin {
+			t.Errorf("%s: required = %q, want %q", label, e.Fields["required"], RoleAdmin)
+		}
+		if e.Fields["path"] == "" || e.Fields["method"] == "" {
+			t.Errorf("%s: the event does not say what was attempted: %+v", label, e)
+		}
+	}
+}
+
+func TestTheDenialEventNamesTheCallerOnlyWhenKnown(t *testing.T) {
+	known := &recordingTrail{}
+	call(t, guardWithTrail(Identity{UserID: "usr-abc", Name: "alice", Role: RoleViewer}, nil, known).
+		Require(RoleAdmin, okHandler(nil)), "Bearer mat_a_b")
+
+	if got := known.all()[0].ActorName; got != "alice" {
+		t.Errorf("actor = %q, want alice: an authenticated caller that was refused is attributable", got)
+	}
+
+	anonymous := &recordingTrail{}
+	call(t, guardWithTrail(Identity{}, InvalidToken(), anonymous).
+		Require(RoleAdmin, okHandler(nil)), "Bearer mat_a_b")
+
+	if got := anonymous.all()[0].ActorName; got != "" {
+		t.Errorf("actor = %q, want empty: nothing was proved about who this was, and guessing would put a name against the wrong person", got)
+	}
+}
+
+func TestAnAllowedRequestLeavesNoDenialEvent(t *testing.T) {
+	trail := &recordingTrail{}
+	guard := guardWithTrail(Identity{UserID: "usr-abc", Name: "alice", Role: RoleAdmin}, nil, trail)
+
+	call(t, guard.Require(RoleOperator, okHandler(nil)), "Bearer mat_a_b")
+
+	if got := len(trail.all()); got != 0 {
+		t.Fatalf("%d events on an allowed request, want 0: the module records what it changed, and duplicating every allowed call here would bury the refusals",
+			got)
+	}
+}
+
+func TestANilTrailIsSafe(t *testing.T) {
+	guard := guardWithTrail(Identity{Role: RoleViewer}, nil, nil)
+
+	if rec := call(t, guard.Require(RoleAdmin, okHandler(nil)), "Bearer mat_a_b"); rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 with no trail configured", rec.Code)
 	}
 }

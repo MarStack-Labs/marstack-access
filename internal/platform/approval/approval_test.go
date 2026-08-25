@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 	"github.com/marstack-labs/marstack-access/internal/kernel/logging"
@@ -60,13 +62,14 @@ func (g *recordingGuard) Require(role string, next http.Handler) http.Handler {
 func newTestModule(t *testing.T, policies Policies) (*Module, *clock) {
 	t.Helper()
 
+	trail := &recordingTrail{}
 	st, err := store.Open(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
 
-	m := New(st, logging.New("error", io.Discard), &recordingGuard{}, policies)
+	m := New(st, logging.New("error", io.Discard), &recordingGuard{}, policies, trail)
 	if err := st.Migrate(context.Background(), m.Migrations()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -489,7 +492,7 @@ func TestRequestingAndApprovingRoutesSplitByRole(t *testing.T) {
 	t.Cleanup(func() { st.Close() })
 
 	guard := &recordingGuard{}
-	New(st, logging.New("error", io.Discard), guard, stubPolicies{}).Routes(http.NewServeMux())
+	New(st, logging.New("error", io.Discard), guard, stubPolicies{}, nil).Routes(http.NewServeMux())
 
 	operators, admins := 0, 0
 	for _, role := range guard.roles {
@@ -564,4 +567,17 @@ func TestAGrantRowStoredWithAnOffsetTimezoneIsStillRefusedWhenExpired(t *testing
 	if err := m.service.HasGrant(ctx, aliceID, dbTarget, "deploy"); err == nil {
 		t.Fatal("an expired grant whose row was written in a non-UTC offset was accepted. The SQL filter compares RFC3339 strings, so the parsed time.Time has to be checked again in Go")
 	}
+}
+
+type recordingTrail struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (r *recordingTrail) Record(_ context.Context, e audit.Event) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.events = append(r.events, e)
+	return nil
 }

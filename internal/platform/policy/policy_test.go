@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 	"github.com/marstack-labs/marstack-access/internal/kernel/logging"
@@ -47,6 +49,7 @@ func (g *recordingGuard) Require(role string, next http.Handler) http.Handler {
 func newTestModule(t *testing.T) (*Module, http.Handler) {
 	t.Helper()
 
+	trail := &recordingTrail{}
 	st, err := store.Open(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -58,7 +61,7 @@ func newTestModule(t *testing.T) (*Module, http.Handler) {
 		webTarget: {"deploy", "www"},
 	}}
 
-	m := New(st, logging.New("error", io.Discard), &recordingGuard{}, targets)
+	m := New(st, logging.New("error", io.Discard), &recordingGuard{}, targets, trail)
 	if err := st.Migrate(context.Background(), m.Migrations()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -514,7 +517,7 @@ func TestEveryRouteRequiresTheAdminRole(t *testing.T) {
 	t.Cleanup(func() { st.Close() })
 
 	guard := &recordingGuard{}
-	New(st, logging.New("error", io.Discard), guard, stubTargets{}).Routes(http.NewServeMux())
+	New(st, logging.New("error", io.Discard), guard, stubTargets{}, nil).Routes(http.NewServeMux())
 
 	if len(guard.roles) != 5 {
 		t.Fatalf("%d routes declared a role, want 5", len(guard.roles))
@@ -534,5 +537,97 @@ func TestMigrationsAreOwnedByThisModule(t *testing.T) {
 		if migration.Module != m.Name() {
 			t.Errorf("migration %d is owned by %q, want %q", migration.Index, migration.Module, m.Name())
 		}
+	}
+}
+
+type recordingTrail struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (r *recordingTrail) Record(_ context.Context, e audit.Event) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.events = append(r.events, e)
+	return nil
+}
+
+func (r *recordingTrail) find(action string) (audit.Event, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, e := range r.events {
+		if e.Action == action {
+			return e, true
+		}
+	}
+	return audit.Event{}, false
+}
+
+func newTestModuleWithTrail(t *testing.T) (http.Handler, *recordingTrail) {
+	t.Helper()
+
+	st, err := store.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	targets := stubTargets{principals: map[string][]string{
+		dbTarget:  {"deploy", "postgres"},
+		webTarget: {"deploy", "www"},
+	}}
+
+	trail := &recordingTrail{}
+	m := New(st, logging.New("error", io.Discard), &recordingGuard{}, targets, trail)
+	if err := st.Migrate(context.Background(), m.Migrations()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	m.Routes(mux)
+	return mux, trail
+}
+
+func TestWritingPolicyLandsInTheTrail(t *testing.T) {
+	h, trail := newTestModuleWithTrail(t)
+
+	created := createPolicy(t, h, `{"name":"ops-db","subject_kind":"role","subject_id":"operator","target_id":"`+
+		dbTarget+`","principals":["deploy"]}`)
+
+	event, ok := trail.find("policy.created")
+	if !ok {
+		t.Fatal("creating a policy left no audit event. Without it the trail cannot answer who changed the rules")
+	}
+	if event.Object != created.ID {
+		t.Errorf("object = %q, want %q", event.Object, created.ID)
+	}
+	if event.Fields["subject"] != "role:operator" {
+		t.Errorf("subject = %q, want role:operator", event.Fields["subject"])
+	}
+	if event.Fields["principals"] != "deploy" {
+		t.Errorf("principals = %q, want deploy", event.Fields["principals"])
+	}
+
+	if rec := send(t, h, http.MethodDelete, "/v1/policies/"+created.ID, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d", rec.Code)
+	}
+	if _, ok := trail.find("policy.deleted"); !ok {
+		t.Fatal("deleting a policy left no audit event")
+	}
+}
+
+func TestEvaluatingAPolicyLeavesNoEvent(t *testing.T) {
+	h, trail := newTestModuleWithTrail(t)
+
+	createPolicy(t, h, `{"name":"ops-db","subject_kind":"role","subject_id":"operator","target_id":"`+
+		dbTarget+`","principals":["deploy"]}`)
+
+	send(t, h, http.MethodPost, "/v1/policies/evaluate",
+		`{"user_id":"`+aliceID+`","role":"operator","target_id":"`+dbTarget+`","principal":"deploy"}`)
+
+	if _, ok := trail.find("policy.evaluated"); ok {
+		t.Fatal("a read-only evaluation wrote to the trail. The trail records changes and decisions that grant access; an admin asking a hypothetical is neither, and recording it would bury the events that matter")
 	}
 }

@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
 	"github.com/marstack-labs/marstack-access/internal/kernel/logging"
 	"github.com/marstack-labs/marstack-access/internal/kernel/sshkey"
 	"github.com/marstack-labs/marstack-access/internal/store"
@@ -32,13 +34,14 @@ func (g *recordingGuard) Require(role string, next http.Handler) http.Handler {
 func newTestModule(t *testing.T) (*Module, http.Handler) {
 	t.Helper()
 
+	trail := &recordingTrail{}
 	st, err := store.Open(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
 
-	m := New(st, logging.New("error", io.Discard), &recordingGuard{})
+	m := New(st, logging.New("error", io.Discard), &recordingGuard{}, trail)
 	if err := st.Migrate(context.Background(), m.Migrations()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -376,7 +379,7 @@ func TestTargetsSurviveARestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	m := New(st, log, &recordingGuard{})
+	m := New(st, log, &recordingGuard{}, nil)
 	if err := st.Migrate(ctx, m.Migrations()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -390,7 +393,7 @@ func TestTargetsSurviveARestart(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer st2.Close()
-	m2 := New(st2, log, &recordingGuard{})
+	m2 := New(st2, log, &recordingGuard{}, nil)
 	if err := st2.Migrate(ctx, m2.Migrations()); err != nil {
 		t.Fatalf("re-migrate: %v", err)
 	}
@@ -421,7 +424,7 @@ func TestEveryRouteRequiresTheOperatorRole(t *testing.T) {
 	t.Cleanup(func() { st.Close() })
 
 	guard := &recordingGuard{}
-	New(st, logging.New("error", io.Discard), guard).Routes(http.NewServeMux())
+	New(st, logging.New("error", io.Discard), guard, nil).Routes(http.NewServeMux())
 
 	if len(guard.roles) != 5 {
 		t.Fatalf("%d routes declared a role, want 5: a route that skips the guard is reachable unauthenticated",
@@ -584,7 +587,7 @@ func TestAPinnedKeySurvivesARestartAndStillParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	m := New(st, log, &recordingGuard{})
+	m := New(st, log, &recordingGuard{}, nil)
 	if err := st.Migrate(ctx, m.Migrations()); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -599,7 +602,7 @@ func TestAPinnedKeySurvivesARestartAndStillParses(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer st2.Close()
-	m2 := New(st2, log, &recordingGuard{})
+	m2 := New(st2, log, &recordingGuard{}, nil)
 	if err := st2.Migrate(ctx, m2.Migrations()); err != nil {
 		t.Fatalf("re-migrate: %v", err)
 	}
@@ -625,5 +628,86 @@ func TestTheHostKeyColumnIsAddedToAnExistingTable(t *testing.T) {
 	if !strings.Contains(migration.SQL, "ALTER TABLE targets") {
 		t.Fatalf("migration 4 = %q, want an ALTER on the existing table. Recreating the table would drop every registered target",
 			migration.SQL)
+	}
+}
+
+type recordingTrail struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (r *recordingTrail) Record(_ context.Context, e audit.Event) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.events = append(r.events, e)
+	return nil
+}
+
+func (r *recordingTrail) find(action string) (audit.Event, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, e := range r.events {
+		if e.Action == action {
+			return e, true
+		}
+	}
+	return audit.Event{}, false
+}
+
+func newTestModuleWithTrail(t *testing.T) (http.Handler, *recordingTrail) {
+	t.Helper()
+
+	st, err := store.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	trail := &recordingTrail{}
+	m := New(st, logging.New("error", io.Discard), &recordingGuard{}, trail)
+	if err := st.Migrate(context.Background(), m.Migrations()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	m.Routes(mux)
+	return mux, trail
+}
+
+func TestTargetChangesLandInTheTrail(t *testing.T) {
+	h, trail := newTestModuleWithTrail(t)
+
+	created := registerTarget(t, h, `{"name":"db-1","address":"10.0.0.4","principals":["deploy"]}`)
+
+	event, ok := trail.find("target.registered")
+	if !ok {
+		t.Fatal("registering a target left no audit event")
+	}
+	if event.Object != created.ID || event.Fields["address"] != "10.0.0.4" {
+		t.Errorf("event = %+v", event)
+	}
+
+	raw := strings.TrimSpace(hostKeyLine(t))
+	if rec := send(t, h, http.MethodPost, "/v1/targets/"+created.ID+"/host-key",
+		`{"host_key":"`+raw+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("trust: %d (%s)", rec.Code, rec.Body)
+	}
+
+	pinned, ok := trail.find("target.host_key_pinned")
+	if !ok {
+		t.Fatal("pinning a host key left no audit event. Pinning is a claim about which machine an entry means, so it has to be attributable")
+	}
+	want, err := sshkey.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if pinned.Fields["fingerprint"] != want.Fingerprint {
+		t.Errorf("fingerprint = %q, want %q", pinned.Fields["fingerprint"], want.Fingerprint)
+	}
+	if pinned.Fields["replaced"] != "false" {
+		t.Errorf("replaced = %q, want false: a replacement and a first pin have to be distinguishable in the trail",
+			pinned.Fields["replaced"])
 	}
 }

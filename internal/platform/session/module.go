@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
 	"github.com/marstack-labs/marstack-access/internal/store"
@@ -21,10 +22,15 @@ type Guard interface {
 type Module struct {
 	service *service
 	guard   Guard
+	trail   audit.Trail
 	log     *slog.Logger
 }
 
-func New(st *store.Store, log *slog.Logger, guard Guard, terminator Terminator) *Module {
+func New(st *store.Store, log *slog.Logger, guard Guard, terminator Terminator, trail audit.Trail) *Module {
+	if trail == nil {
+		trail = audit.Discard()
+	}
+
 	return &Module{
 		service: &service{
 			repo:       &repository{db: st.DB()},
@@ -33,6 +39,7 @@ func New(st *store.Store, log *slog.Logger, guard Guard, terminator Terminator) 
 			now:        time.Now,
 		},
 		guard: guard,
+		trail: trail,
 		log:   log,
 	}
 }

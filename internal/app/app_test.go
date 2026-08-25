@@ -1024,3 +1024,148 @@ func TestConfiguringLokiIsLogged(t *testing.T) {
 		t.Error("the log both warns and confirms")
 	}
 }
+
+func auditEvents(t *testing.T, dir string) []map[string]any {
+	t.Helper()
+
+	raw, err := os.ReadFile(filepath.Join(dir, auditDir, "audit.jsonl"))
+	if err != nil {
+		t.Fatalf("read trail: %v", err)
+	}
+
+	events := []map[string]any{}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
+			continue
+		}
+		var e map[string]any
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("trail line is not JSON: %v (%s)", err, line)
+		}
+		events = append(events, e)
+	}
+	return events
+}
+
+func findEvent(events []map[string]any, action string) (map[string]any, bool) {
+	for _, e := range events {
+		if e["action"] == action {
+			return e, true
+		}
+	}
+	return nil, false
+}
+
+func TestTheWholeApprovalFlowIsAttributableInTheTrail(t *testing.T) {
+	dir := t.TempDir()
+	a, err := New(context.Background(), Config{DataDir: dir}, logging.New("error", io.Discard))
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer a.Close()
+
+	admin, err := os.ReadFile(filepath.Join(dir, bootstrapTokenFile))
+	if err != nil {
+		t.Fatalf("read bootstrap token: %v", err)
+	}
+	adminToken := strings.TrimSpace(string(admin))
+
+	created := send(t, a, http.MethodPost, "/v1/targets", adminToken,
+		`{"name":"db-1","address":"10.0.0.4","principals":["deploy"]}`)
+	targetID := decodeBody(t, created)["id"].(string)
+
+	send(t, a, http.MethodPost, "/v1/policies", adminToken,
+		`{"name":"ops-db","subject_kind":"role","subject_id":"operator","target_id":"`+
+			targetID+`","principals":["deploy"]}`)
+
+	operator := tokenForRole(t, a, adminToken, "alice", authz.RoleOperator)
+
+	raised := send(t, a, http.MethodPost, "/v1/access-requests", operator,
+		`{"target_id":"`+targetID+`","principal":"deploy","reason":"incident 4821"}`)
+	if raised.Code != http.StatusCreated {
+		t.Fatalf("raise: %d (%s)", raised.Code, raised.Body)
+	}
+	requestID := decodeBody(t, raised)["id"].(string)
+
+	approved := send(t, a, http.MethodPost, "/v1/access-requests/"+requestID+"/approve", adminToken, "")
+	if approved.Code != http.StatusOK {
+		t.Fatalf("approve: %d (%s)", approved.Code, approved.Body)
+	}
+
+	events := auditEvents(t, dir)
+
+	for _, action := range []string{
+		"target.registered", "policy.created", "user.created",
+		"token.issued", "request.raised", "request.approved",
+	} {
+		if _, ok := findEvent(events, action); !ok {
+			t.Errorf("the trail has no %q event", action)
+		}
+	}
+
+	raise, _ := findEvent(events, "request.raised")
+	if raise["actor_name"] != "alice" {
+		t.Errorf("the raise is attributed to %v, want alice", raise["actor_name"])
+	}
+
+	decision, _ := findEvent(events, "request.approved")
+	if decision["actor_name"] != "admin" {
+		t.Errorf("the approval is attributed to %v, want admin", decision["actor_name"])
+	}
+	if raise["actor_name"] == decision["actor_name"] {
+		t.Fatal("the requester and the approver are the same account in the trail, which self-approval is supposed to make impossible")
+	}
+}
+
+func TestARefusedAPICallLandsInTheTrail(t *testing.T) {
+	dir := t.TempDir()
+	a, err := New(context.Background(), Config{DataDir: dir}, logging.New("error", io.Discard))
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer a.Close()
+
+	admin, err := os.ReadFile(filepath.Join(dir, bootstrapTokenFile))
+	if err != nil {
+		t.Fatalf("read token: %v", err)
+	}
+	adminToken := strings.TrimSpace(string(admin))
+	operator := tokenForRole(t, a, adminToken, "alice", authz.RoleOperator)
+
+	if rec := send(t, a, http.MethodGet, "/v1/users", operator, ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if rec := send(t, a, http.MethodGet, "/v1/targets", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+
+	events := auditEvents(t, dir)
+
+	denials := 0
+	sawInsufficient, sawMissing := false, false
+	for _, e := range events {
+		if e["action"] != "api.denied" {
+			continue
+		}
+		denials++
+		switch e["reason"] {
+		case "insufficient_role":
+			sawInsufficient = true
+			if e["actor_name"] != "alice" {
+				t.Errorf("the 403 is attributed to %v, want alice", e["actor_name"])
+			}
+		case "missing_token":
+			sawMissing = true
+			if e["actor_name"] != nil {
+				t.Errorf("the 401 names %v as the actor, but nothing was proved about who it was", e["actor_name"])
+			}
+		}
+	}
+
+	if denials < 2 {
+		t.Fatalf("%d denial events, want at least 2", denials)
+	}
+	if !sawInsufficient || !sawMissing {
+		t.Fatal("the trail does not distinguish a caller who was refused from a caller who never identified itself")
+	}
+}

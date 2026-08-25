@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
@@ -114,6 +115,22 @@ func (m *Module) handleKill(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+
+	outcome := audit.OutcomeAllowed
+	if !killed {
+		outcome = audit.OutcomeError
+	}
+	authz.Emit(r.Context(), m.trail, m.log, audit.Event{
+		Action:  "session.killed",
+		Outcome: outcome,
+		Object:  record.ID,
+		Fields: map[string]string{
+			"user":      record.UserName,
+			"target":    record.TargetName,
+			"principal": record.Principal,
+			"recording": record.Recording,
+		},
+	})
 
 	view := killView{Killed: killed, Session: viewOf(record)}
 	if !killed {

@@ -112,20 +112,20 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	guard := authz.New(authz.AuthenticatorFunc(
 		func(ctx context.Context, secret string) (authz.Identity, error) {
 			return idm.Authenticate(ctx, secret)
-		}), log)
-	idm = identity.New(st, log, guard)
+		}), log, a.trail)
+	idm = identity.New(st, log, guard, a.trail)
 
-	targets := target.New(st, log, guard)
-	policies := policy.New(st, log, guard, targets)
+	targets := target.New(st, log, guard, a.trail)
+	policies := policy.New(st, log, guard, targets, a.trail)
 
-	grants := approval.New(st, log, guard, policies)
+	grants := approval.New(st, log, guard, policies, a.trail)
 
 	sessions := session.New(st, log, guard, session.TerminatorFunc(func(sessionID string) bool {
 		if a.sshd == nil {
 			return false
 		}
 		return a.sshd.Kill(sessionID)
-	}))
+	}), a.trail)
 
 	a.modules = []Module{
 		system.New(st, log, guard),

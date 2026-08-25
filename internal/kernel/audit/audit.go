@@ -35,6 +35,20 @@ type Sink interface {
 	Append(ctx context.Context, events []Event) error
 }
 
+type Trail interface {
+	Record(ctx context.Context, e Event) error
+}
+
+type discard struct{}
+
+func (discard) Record(context.Context, Event) error {
+	return nil
+}
+
+func Discard() Trail {
+	return discard{}
+}
+
 type Recorder struct {
 	durable Sink
 	shipped Sink
