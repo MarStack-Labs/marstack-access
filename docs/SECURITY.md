@@ -32,10 +32,23 @@ These hold everywhere. A change that weakens one is a design change, not a refac
 2. **Validate at the boundary, then trust the value.** Input is parsed into a typed value once, at
    the edge, with unknown fields rejected. Deeper layers never re-parse strings from clients.
 
-3. **No standing credential to a target exists in this process.** There is no target password, no
-   target private key, and no CA private key in this binary or in its database. Reading the entire
-   database gives an attacker no way to authenticate to any target. This is why the platform is a
-   certificate authority client and not a credential vault.
+3. **No standing credential to a target exists in the database, and none on the production path.**
+   There is no target password and no target private key anywhere, and nothing in the database can
+   authenticate to any target. This is why the platform is a certificate authority client and not a
+   credential vault.
+
+   The signing key is the one credential that could mint access. On the production path it is held
+   by `marstack-secrets` behind a signing call, and this process never sees it. **A development mode
+   breaks that, deliberately and visibly:** `certs.FileSigner` loads a signing key from a local file
+   so the platform can run end to end before `marstack-secrets` is deployed.
+
+   It is not a default and cannot become one by accident. The key has to be created by name with
+   `marac ca init --path`, and the server has to be pointed at it explicitly. A deployment that
+   never passes that path holds no signing key, and this invariant reads exactly as it did before. A
+   deployment that does pass it has moved the trust boundary into the gateway and should know it.
+
+   This paragraph exists rather than a quiet edit to the sentence above. An invariant that stops
+   being true without saying so is worse than one that was never claimed.
 
 4. **Identity is derived, never asserted.** The principal a session lands as comes from the
    authenticated identity and the matching grant, never from a field in a request body. This is the
@@ -70,7 +83,7 @@ These hold everywhere. A change that weakens one is a design change, not a refac
 |---|---|
 | Deny by default | `kernel/fault` defaults to `Internal`; authorization middleware refuses routes that declare no policy |
 | Validate at the boundary | `httpx.Decode` sets `DisallowUnknownFields` and caps body size; `kernel/validate` |
-| No standing credential | there is no schema for one; the signing call lives in `marstack-secrets` |
+| No standing credential | there is no schema for one; the signing call lives in `marstack-secrets`, and the file-backed development signer must be named on the command line |
 | Derived identity | authorization middleware puts the identity on the request context; handlers read it from there |
 | Recording is mandatory | the recorder wraps the connection a dialer returns, so no dialer can skip it |
 | Scoped authority | one place builds the certificate request; principal, target, TTL, and source address are all required fields |
@@ -309,6 +322,43 @@ controls.
 generating a replacement would invalidate every client's stored key at the same moment, which is
 indistinguishable from a man-in-the-middle and teaches operators to click through the warning. The
 fingerprint is logged at startup so it can be pinned.
+
+## Session certificates
+
+A session authenticates to a target with a certificate minted for that session alone. The data plane
+generates an ephemeral keypair, asks a `Signer` to certify the public half, and uses the result. The
+private half never leaves the process and the signer never sees it, which is what lets a production
+signer be a remote call that only ever signs a blob.
+
+Every certificate carries:
+
+| Field | Value | Why |
+|---|---|---|
+| principals | exactly one | the account this session lands as, and nothing else |
+| `source-address` | the data plane's own IP, as a host prefix | a leaked certificate is useless from anywhere else |
+| validity | minutes | `sshd` checks a certificate at authentication time only |
+| `KeyId` | the session id | the only label an audit reader has for the certificate |
+| serial | 80 bits of `crypto/rand` | two certificates are never confusable in a trail |
+| extensions | `permit-pty` and nothing else | see below |
+
+**The extension list is the part most likely to be got wrong.** A certificate built without thinking
+about extensions inherits OpenSSH's defaults, which grant `permit-port-forwarding`,
+`permit-agent-forwarding`, `permit-X11-forwarding`, and `permit-user-rc` on the target. The SSH front
+door refuses all of those on the gateway side; granting them in the certificate would hand them back
+on the target side. `TestACertificateGrantsNoForwarding` asserts the extension map contains
+`permit-pty` alone.
+
+**Caps are shared, not per-implementation.** `certs.Check` enforces one principal, a real IP source
+address, and a maximum lifetime, and every `Signer` calls it. A cap that each implementation is
+trusted to remember is advice, not a cap.
+
+**These properties are tested against a real SSH handshake, not by reading the certificate back.**
+An `sshd` configured to trust the CA accepts the certificate for its own principal and refuses it
+for another, refuses one signed by a different CA, refuses one whose window has closed, and refuses
+one pinned to a different source address. The first attempt at this used
+`ssh.CertChecker.CheckCert`, which validates principals and validity but **does not verify the
+signature or the authority at all** — that happens in `Authenticate`. The test passed while proving
+nothing about the CA, which is why the checks now run through a handshake.
 
 ## Bootstrap
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -1045,5 +1046,69 @@ func TestKeyRemoveConfirms(t *testing.T) {
 	}
 	if !strings.Contains(out, "removed key-abc") {
 		t.Fatalf("output = %q, want a removal confirmation", out)
+	}
+}
+
+func TestCAInitPrintsTheTargetSetup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ca")
+
+	out, err := run(t, "ca", "init", "--path", path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v (%s)", err, out)
+	}
+
+	for _, want := range []string{
+		"fingerprint SHA256:",
+		"TrustedUserCAKeys",
+		"AuthorizedPrincipalsFile",
+		"ssh-ed25519",
+		"no daemon runs there",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestCAInitRefusesToOverwrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ca")
+
+	if _, err := run(t, "ca", "init", "--path", path); err != nil {
+		t.Fatalf("first init: %v", err)
+	}
+	if _, err := run(t, "ca", "init", "--path", path); err == nil {
+		t.Fatal("a second init overwrote the key, which would silently break every target that trusts it")
+	}
+}
+
+func TestCAShowMatchesInit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ca")
+
+	created, err := run(t, "ca", "init", "--path", path)
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	shown, err := run(t, "ca", "show", "--path", path)
+	if err != nil {
+		t.Fatalf("show: %v", err)
+	}
+
+	fingerprint := func(out string) string {
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "fingerprint ") {
+				return line
+			}
+		}
+		return ""
+	}
+
+	if got, want := fingerprint(shown), fingerprint(created); got == "" || got != want {
+		t.Fatalf("show reported %q, init reported %q", got, want)
+	}
+}
+
+func TestCAShowRejectsAMissingKey(t *testing.T) {
+	if _, err := run(t, "ca", "show", "--path", filepath.Join(t.TempDir(), "absent")); err == nil {
+		t.Fatal("expected an error for a missing key")
 	}
 }

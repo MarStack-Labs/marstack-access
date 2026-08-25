@@ -219,6 +219,34 @@ captures.
 The target connection itself is not implemented yet: an authorized session reports what it resolved
 and closes.
 
+## Preparing a target
+
+A target trusts the platform through two files and no daemon. Create a signing authority and print
+what to install:
+
+```sh
+marac ca init --path ./data/ca
+```
+
+```
+fingerprint SHA256:...
+
+Install this on every target, then reload sshd:
+
+  echo "ssh-ed25519 AAAA..." | sudo tee /etc/ssh/marstack_ca.pub
+  # in /etc/ssh/sshd_config
+  TrustedUserCAKeys /etc/ssh/marstack_ca.pub
+  AuthorizedPrincipalsFile /etc/ssh/principals/%u
+```
+
+Sessions authenticate with a certificate minted for that session alone: one principal, pinned to the
+gateway's own IP, valid for minutes, and carrying `permit-pty` and nothing else — so port forwarding
+and agent forwarding are not granted on the target either.
+
+> `marac ca` keeps the signing key in a local file. That is a development mode, and
+> [`docs/SECURITY.md`](docs/SECURITY.md) says what it costs. A production deployment keeps the key in
+> `marstack-secrets`, so no process that terminates user traffic ever holds it.
+
 The client talks to `$MARAC_ENDPOINT`, or `--endpoint`, or loopback. `--output json` prints the raw
 API response for scripting:
 
