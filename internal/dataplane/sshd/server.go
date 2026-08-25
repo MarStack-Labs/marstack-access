@@ -46,6 +46,28 @@ type Grants interface {
 
 type TargetLookup func(ctx context.Context, name string) (Target, error)
 
+type SessionOpened struct {
+	ID           string
+	UserID       string
+	UserName     string
+	TargetID     string
+	TargetName   string
+	Principal    string
+	CredentialID string
+	RemoteAddr   string
+	Recording    string
+}
+
+type SessionClosed struct {
+	ExitCode      int
+	Reason        string
+	RecordedBytes int64
+}
+
+type SessionOpener func(ctx context.Context, s SessionOpened) error
+
+type SessionCloser func(ctx context.Context, id string, s SessionClosed) error
+
 type Config struct {
 	Listen      string
 	DataDir     string
@@ -53,35 +75,42 @@ type Config struct {
 }
 
 type Server struct {
-	cfg        Config
-	log        *slog.Logger
-	identities Identities
-	targets    TargetLookup
-	policies   Policies
-	grants     Grants
-	dialer     *dialer
-	now        func() time.Time
-	sshConfig  *ssh.ServerConfig
-	hostKey    ssh.PublicKey
+	cfg          Config
+	log          *slog.Logger
+	identities   Identities
+	targets      TargetLookup
+	policies     Policies
+	grants       Grants
+	dialer       *dialer
+	openSession  SessionOpener
+	closeSession SessionCloser
+	live         *registry
+	now          func() time.Time
+	sshConfig    *ssh.ServerConfig
+	hostKey      ssh.PublicKey
 }
 
 func New(cfg Config, log *slog.Logger, identities Identities, targets TargetLookup,
-	policies Policies, grants Grants, signer certs.Signer) (*Server, error) {
+	policies Policies, grants Grants, signer certs.Signer,
+	opener SessionOpener, closer SessionCloser) (*Server, error) {
 	hostKey, err := loadOrCreateHostKey(cfg.DataDir)
 	if err != nil {
 		return nil, err
 	}
 
 	s := &Server{
-		cfg:        cfg,
-		log:        log,
-		identities: identities,
-		targets:    targets,
-		policies:   policies,
-		grants:     grants,
-		dialer:     &dialer{signer: signer, advertiseIP: cfg.AdvertiseIP, now: time.Now},
-		now:        time.Now,
-		hostKey:    hostKey.PublicKey(),
+		cfg:          cfg,
+		log:          log,
+		identities:   identities,
+		targets:      targets,
+		policies:     policies,
+		grants:       grants,
+		dialer:       &dialer{signer: signer, advertiseIP: cfg.AdvertiseIP, now: time.Now},
+		openSession:  opener,
+		closeSession: closer,
+		live:         newRegistry(),
+		now:          time.Now,
+		hostKey:      hostKey.PublicKey(),
 	}
 
 	s.sshConfig = &ssh.ServerConfig{
@@ -95,6 +124,14 @@ func New(cfg Config, log *slog.Logger, identities Identities, targets TargetLook
 
 func (s *Server) HostKeyFingerprint() string {
 	return ssh.FingerprintSHA256(s.hostKey)
+}
+
+func (s *Server) Kill(sessionID string) bool {
+	return s.live.kill(sessionID)
+}
+
+func (s *Server) LiveSessions() int {
+	return s.live.count()
 }
 
 func (s *Server) authenticate(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {

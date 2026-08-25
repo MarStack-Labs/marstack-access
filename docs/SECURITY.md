@@ -410,6 +410,34 @@ event is ever written.
 **Recordings are `0600` in a `0700` directory, named by session id.** The file is opened with
 `O_EXCL`, so a session id collision fails rather than appending to somebody else's recording.
 
+## Sessions and the kill switch
+
+Every session the data plane opens gets a row before the target is dialed, carrying who connected,
+from where, as which principal, with which credential, and where the recording is.
+
+**A session that cannot be written to the store is refused.** The reasoning is the same as the
+recorder, one step further: a session nobody can list is also a session nobody can kill, and an
+unkillable session is worse than a refused one. The row is written after the recording is opened and
+before the target is dialed, and there is a test asserting the target authenticated zero times when
+the write fails.
+
+**A failed dial still closes its row.** Otherwise a target that is merely unreachable would leave a
+row listed as active forever, and the list of live sessions — the thing an incident responder reads
+first — would fill with sessions that never happened.
+
+**Killing is admin-only.** An operator can list and read their own sessions but not close one. The
+kill switch exists for the incident case, and the incident responder is an admin. An operator who
+wants their own session gone can close their client.
+
+**A kill that closed nothing says so.** If the row is open but this node holds no socket for it, the
+response reports `killed: false` with the reason. Reporting success would tell an incident responder
+the session is gone when it is not, which is the worst available answer.
+
+**Rows left open by a crash are closed on the next start.** The data plane holds no state across
+restarts, so an open row at startup is a phantom: it can never be killed and it makes the live list
+lie. `Reconcile` closes them with exit code `-1` and a reason that names the restart, so they are
+not mistaken for clean exits.
+
 ## Bootstrap
 
 On a store with no users, the first start creates an `admin` user, issues it a token, and writes the

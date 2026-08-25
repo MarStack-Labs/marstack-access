@@ -254,6 +254,18 @@ grep -o 'sudo [^"]*' data/recordings/*.cast
 Only output is recorded. A shell echoes what is typed, so commands stay greppable, but a password
 typed at a `sudo` prompt is never echoed and so never written down.
 
+Every session is listed, and an admin can close one:
+
+```sh
+marac session list
+marac session get ses-xxxxxxxxxxxxx      # includes where the recording is
+marac session kill ses-xxxxxxxxxxxxx     # admin only
+```
+
+A kill that closed nothing says so rather than reporting success — the row may have been opened by a
+run that has since stopped. Rows left open by a crash are closed on the next start with a reason
+naming the restart, so the list of live sessions does not fill with sessions that are not running.
+
 > `--dev-ca-key` holds the signing key in a local file. Without it the front door still authorises
 > but cannot connect, and it says so. See [`docs/SECURITY.md`](docs/SECURITY.md) for what the
 > development mode costs.

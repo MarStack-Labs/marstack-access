@@ -129,11 +129,38 @@ func (s *Server) proxy(ctx context.Context, sessionID, remote string, id authz.I
 	}
 	defer rec.Close()
 
-	client, err := s.dialer.dial(ctx, sessionID, res.target, res.destination.principal)
+	if err := s.openSession(ctx, SessionOpened{
+		ID:           sessionID,
+		UserID:       id.UserID,
+		UserName:     id.Name,
+		TargetID:     res.target.ID,
+		TargetName:   res.target.Name,
+		Principal:    res.destination.principal,
+		CredentialID: id.CredentialID,
+		RemoteAddr:   remote,
+		Recording:    rec.Path(),
+	}); err != nil {
+		s.log.Error("ssh session could not be recorded in the store",
+			"session", sessionID, "user", id.Name, "error", err.Error())
+		s.refuse(channel, fault.Unavailable("session_not_recordable",
+			"this session cannot be listed or closed by an operator, so it will not be opened"))
+		return
+	}
+
+	sessionCtx, cancel := context.WithCancel(ctx)
+	s.live.add(sessionID, cancel)
+
+	defer func() {
+		cancel()
+		s.live.remove(sessionID)
+	}()
+
+	client, err := s.dialer.dial(sessionCtx, sessionID, res.target, res.destination.principal)
 	if err != nil {
 		s.log.Warn("ssh target dial failed",
 			"session", sessionID, "user", id.Name, "target", res.target.Name,
 			"code", fault.From(err).Code)
+		s.finish(ctx, sessionID, exitRefused, fault.From(err).Code, rec)
 		s.refuse(channel, err)
 		return
 	}
@@ -141,6 +168,7 @@ func (s *Server) proxy(ctx context.Context, sessionID, remote string, id authz.I
 
 	targetSession, err := client.NewSession()
 	if err != nil {
+		s.finish(ctx, sessionID, exitRefused, "target refused a session", rec)
 		s.refuse(channel, fault.Unavailable("target_session_failed",
 			fmt.Sprintf("the target refused a session: %v", err)))
 		return
@@ -152,14 +180,26 @@ func (s *Server) proxy(ctx context.Context, sessionID, remote string, id authz.I
 		"credential", id.CredentialID, "target", res.target.Name,
 		"principal", res.destination.principal, "recording", rec.Path())
 
-	code, reason := s.pump(ctx, sessionID, start, forwards, channel, targetSession, rec)
+	code, reason := s.pump(sessionCtx, sessionID, start, forwards, channel, targetSession, rec)
 
 	s.log.Info("ssh session closed",
 		"session", sessionID, "user", id.Name, "target", res.target.Name,
 		"principal", res.destination.principal, "exit", code,
 		"reason", reason, "recorded_bytes", rec.Recorded())
 
+	s.finish(ctx, sessionID, code, reason, rec)
 	sendExitStatus(channel, code)
+}
+
+func (s *Server) finish(ctx context.Context, sessionID string, code uint32, reason string, rec *recorder) {
+	if err := s.closeSession(ctx, sessionID, SessionClosed{
+		ExitCode:      int(code),
+		Reason:        reason,
+		RecordedBytes: rec.Recorded(),
+	}); err != nil {
+		s.log.Error("ssh session close could not be recorded",
+			"session", sessionID, "error", err.Error())
+	}
 }
 
 func (s *Server) pump(ctx context.Context, sessionID string, start startRequest,
@@ -218,7 +258,7 @@ func (s *Server) pump(ctx context.Context, sessionID string, start startRequest,
 	case <-ctx.Done():
 		_ = targetSession.Signal(ssh.SIGHUP)
 		_ = targetSession.Close()
-		return exitRefused, "gateway shutting down"
+		return exitRefused, "closed by the gateway"
 	}
 }
 

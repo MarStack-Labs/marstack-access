@@ -1196,3 +1196,78 @@ func TestTargetListShowsTheHostKeyColumn(t *testing.T) {
 		t.Errorf("an unpinned target shows no placeholder, so it is hard to spot: %s", out)
 	}
 }
+
+func TestSessionListShowsStateAndUser(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, sessionListView{Sessions: []sessionView{
+			{ID: "ses-abc", Active: true, UserName: "alice", TargetName: "db-1",
+				Principal: "deploy", StartedAt: "2026-08-25T10:00:00Z", RecordedBytes: 4096},
+			{ID: "ses-def", Active: false, UserName: "bob", TargetName: "db-2",
+				Principal: "postgres", StartedAt: "2026-08-25T09:00:00Z"},
+		}})
+	})
+
+	out, err := runAgainst(t, endpoint, "session", "list")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{"STATE", "active", "closed", "alice", "db-1", "4096"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSessionGetShowsWhereTheRecordingIs(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, sessionView{
+			ID: "ses-abc", Active: false, UserName: "alice", TargetName: "db-1",
+			Principal: "deploy", StartedAt: "2026-08-25T10:00:00Z",
+			Recording: "/data/recordings/ses-abc.cast", Reason: "target exit status",
+		})
+	})
+
+	out, err := runAgainst(t, endpoint, "session", "get", "ses-abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "/data/recordings/ses-abc.cast") {
+		t.Errorf("output does not say where the recording is: %s", out)
+	}
+	if !strings.Contains(out, "target exit status") {
+		t.Errorf("output does not show why the session ended: %s", out)
+	}
+}
+
+func TestSessionKillReportsWhetherASocketWasClosed(t *testing.T) {
+	closed := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if want := "/v1/sessions/ses-abc/kill"; r.URL.Path != want {
+			t.Errorf("path = %q, want %q", r.URL.Path, want)
+		}
+		writeJSON(t, w, http.StatusOK, killView{Killed: true, Session: sessionView{ID: "ses-abc"}})
+	})
+
+	out, err := runAgainst(t, closed, "session", "kill", "ses-abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "closed ses-abc") {
+		t.Fatalf("output = %q, want a confirmation", out)
+	}
+
+	notClosed := fakeControlPlane(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, killView{
+			Killed:  false,
+			Session: sessionView{ID: "ses-abc"},
+			Note:    "no socket for it is held here",
+		})
+	})
+
+	out, err = runAgainst(t, notClosed, "session", "kill", "ses-abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "not closed") || !strings.Contains(out, "no socket") {
+		t.Fatalf("output = %q, want it to say nothing was closed and why. Printing a bare confirmation would tell an incident responder the session is gone when it is not", out)
+	}
+}

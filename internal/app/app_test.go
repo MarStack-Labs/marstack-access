@@ -163,6 +163,9 @@ func TestEveryRouteExceptHealthzRequiresTheToken(t *testing.T) {
 		{http.MethodGet, "/v1/users/usr-abc/keys"},
 		{http.MethodDelete, "/v1/keys/key-abc"},
 		{http.MethodPost, "/v1/targets/tgt-abc/host-key"},
+		{http.MethodGet, "/v1/sessions"},
+		{http.MethodGet, "/v1/sessions/ses-abc"},
+		{http.MethodPost, "/v1/sessions/ses-abc/kill"},
 	}
 
 	for _, route := range protected {
@@ -896,5 +899,87 @@ func TestUsingALocalSigningKeyIsLoggedAsSuch(t *testing.T) {
 	}
 	if strings.Contains(out, "PRIVATE KEY") {
 		t.Fatal("the log carries key material")
+	}
+}
+
+func TestSessionsAreListableAndEmptyAtStart(t *testing.T) {
+	a, admin := newTestAppWithAdmin(t)
+
+	rec := send(t, a, http.MethodGet, "/v1/sessions", admin, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body)
+	}
+
+	var list struct {
+		Sessions []map[string]any `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if list.Sessions == nil {
+		t.Fatal("sessions is null, not []: a client iterating the field would break")
+	}
+	if len(list.Sessions) != 0 {
+		t.Fatalf("%d sessions before anything connected", len(list.Sessions))
+	}
+}
+
+func TestAnOperatorCannotKillASession(t *testing.T) {
+	a, admin := newTestAppWithAdmin(t)
+	operator := tokenForRole(t, a, admin, "deployer", authz.RoleOperator)
+
+	rec := send(t, a, http.MethodPost, "/v1/sessions/ses-0000000000000/kill", operator, "")
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: the kill switch is for the incident responder", rec.Code)
+	}
+}
+
+func TestKillingAnUnknownSessionIsNotFound(t *testing.T) {
+	a, admin := newTestAppWithAdmin(t)
+
+	rec := send(t, a, http.MethodPost, "/v1/sessions/ses-0000000000000/kill", admin, "")
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestReconcileRunsOnEveryStart(t *testing.T) {
+	dir := t.TempDir()
+	var logged bytes.Buffer
+	ctx := context.Background()
+
+	first, err := New(ctx, Config{DataDir: dir}, logging.New("error", io.Discard))
+	if err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	if _, err := first.store.DB().ExecContext(ctx,
+		`INSERT INTO sessions (id, user_id, user_name, target_id, target_name, principal,
+		 credential_id, remote_addr, recording, started_at)
+		 VALUES ('ses-0000000000001','usr-1','alice','tgt-1','db-1','deploy','key-1','10.1.1.1:1','/r.cast','2026-08-25T10:00:00Z')`,
+	); err != nil {
+		t.Fatalf("insert phantom session: %v", err)
+	}
+	first.Close()
+
+	second, err := New(ctx, Config{DataDir: dir}, slog.New(slog.NewTextHandler(&logged, nil)))
+	if err != nil {
+		t.Fatalf("second start: %v", err)
+	}
+	defer second.Close()
+
+	var endedAt, reason string
+	if err := second.store.DB().QueryRowContext(ctx,
+		`SELECT COALESCE(ended_at, ''), COALESCE(reason, '') FROM sessions WHERE id = 'ses-0000000000001'`,
+	).Scan(&endedAt, &reason); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+
+	if endedAt == "" {
+		t.Fatal("a session left open by an earlier run is still open. The data plane holds no state, so an open row at startup is a phantom nobody can kill")
+	}
+	if !strings.Contains(logged.String(), "left open by an earlier run") {
+		t.Errorf("the log does not mention the cleanup: %s", logged.String())
 	}
 }

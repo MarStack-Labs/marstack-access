@@ -173,11 +173,8 @@ target      the SSH target inventory                               done
 identity    users, roles, API tokens                               done
 policy      who may reach which target as which principal          done
 approval    JIT request, approve, time-boxed grant                 done
-session     the live session record and the kill switch
+session     the live session record and the kill switch                done
 audit       the append-only event trail and the recording index
-
-The proxy, the certificate dialer, and the asciicast recorder are done; what remains is putting a
-session row in the database so the control plane can list live sessions and close one.
 ```
 
 The data plane lives in `internal/dataplane/sshd`. It answers four questions in order, and any one
@@ -277,6 +274,31 @@ deleted, its policies survive as rows that can never match again, because target
 `crypto/rand` and are never reused. Sequential ids would make that stale row a live grant the day
 the counter came round; random ids make it permanently inert.
 
+## Closing a socket the control plane does not hold
+
+The kill switch crosses the plane boundary in the direction the interfaces normally do not go: an
+HTTP request arrives at the control plane and has to close a socket the data plane holds.
+
+`session` declares what it needs and `app` injects the data plane's registry:
+
+```go
+type Terminator interface {
+	Kill(sessionID string) bool
+}
+```
+
+`sshd` keeps a map of live session id to `context.CancelFunc`, added when the proxy starts and
+removed when it ends. Cancelling the context is what ends the session — the same path a gateway
+shutdown takes — so there is one way for a session to be closed from the outside rather than two.
+
+`session` never imports `dataplane`, and the architecture test that forbids it keeps passing. The
+cycle between the two — the data plane writes session rows, the control plane closes data plane
+sockets — is resolved in `app` with a closure, the same way the guard and `identity` are.
+
+**A row with no live socket reports that, rather than reporting success.** The row may have been
+opened by a run that has since stopped, or on another node once there is more than one. Telling an
+incident responder a session is closed when it is not is the worst possible answer here.
+
 ## Bootstrap and optional module capabilities
 
 A module may need to run once at startup, before it serves anything. Rather than widen `Module` and
@@ -289,7 +311,9 @@ type Bootstrapper interface {
 ```
 
 `identity` implements it and returns the bootstrap secret, or an empty string when there is nothing
-to do. `app` owns the filesystem — it holds `DataDir` — so `app` writes the secret to a `0600` file
+to do. `Reconciler` is a second optional interface, called after migrations on every start:
+`session` uses it to close rows left open by a run that stopped without closing them. The data plane
+keeps no state across restarts, so any open row at startup is a phantom that nothing can kill. `app` owns the filesystem — it holds `DataDir` — so `app` writes the secret to a `0600` file
 and logs the path. The module never touches the disk, and adding a second bootstrapping module
 requires editing neither `Module` nor any existing module.
 

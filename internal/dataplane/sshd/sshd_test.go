@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,6 +39,44 @@ type stubs struct {
 	targets      map[string]Target
 	policyDenied bool
 	grantDenied  bool
+
+	mu        sync.Mutex
+	opened    []SessionOpened
+	closed    map[string]SessionClosed
+	openFails bool
+}
+
+func (s *stubs) Open(_ context.Context, rec SessionOpened) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.openFails {
+		return fault.Unavailable("store_down", "the session store is unreachable")
+	}
+	s.opened = append(s.opened, rec)
+	return nil
+}
+
+func (s *stubs) Close(_ context.Context, id string, rec SessionClosed) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed == nil {
+		s.closed = map[string]SessionClosed{}
+	}
+	s.closed[id] = rec
+	return nil
+}
+
+func (s *stubs) records() ([]SessionOpened, map[string]SessionClosed) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	snapshot := map[string]SessionClosed{}
+	for id, rec := range s.closed {
+		snapshot[id] = rec
+	}
+	return append([]SessionOpened{}, s.opened...), snapshot
 }
 
 func newStubs() *stubs {
@@ -107,7 +146,7 @@ func startServerWith(t *testing.T, st *stubs, signer certs.Signer, dataDir strin
 	t.Helper()
 
 	srv, err := New(Config{Listen: "127.0.0.1:0", DataDir: dataDir, AdvertiseIP: "127.0.0.1"},
-		logging.New("error", io.Discard), st, st.lookup, st, st, signer)
+		logging.New("error", io.Discard), st, st.lookup, st, st, signer, st.Open, st.Close)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
@@ -353,13 +392,13 @@ func TestTheHostKeyIsStableAcrossRestarts(t *testing.T) {
 	st := newStubs()
 
 	first, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st, nil)
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close)
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
 
 	second, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st, nil)
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close)
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -374,7 +413,7 @@ func TestTheHostKeyIsNotWorldReadable(t *testing.T) {
 	st := newStubs()
 
 	if _, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st, nil); err != nil {
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close); err != nil {
 		t.Fatalf("new: %v", err)
 	}
 
@@ -396,7 +435,7 @@ func TestACorruptHostKeyFailsRatherThanBeingReplaced(t *testing.T) {
 	}
 
 	if _, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st, nil); err == nil {
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close); err == nil {
 		t.Fatal("a corrupt host key was silently replaced. Generating a new one would make every client's stored key wrong at once, which is indistinguishable from an attack")
 	}
 }
@@ -838,5 +877,192 @@ func TestExecRunsOnTheTarget(t *testing.T) {
 	waitFor(t, "the target to see the session", func() bool {
 		_, _, sessions := target.seen()
 		return sessions == 1
+	})
+}
+
+func TestASessionIsRecordedOpenThenClosed(t *testing.T) {
+	ca := newTestCA(t)
+	target := startFakeTarget(t, ca)
+	st, clientKey := registeredAlice(t)
+	st.targets["db-1"] = fakeTargetEntry(t, target)
+	srv, addr := startServerWith(t, st, ca, t.TempDir())
+
+	if res := dial(t, srv, addr, "deploy:db-1", clientKey); res.err != nil {
+		t.Fatalf("session failed: %v (%s)", res.err, res.stderr)
+	}
+
+	opened, closed := st.records()
+	if len(opened) != 1 {
+		t.Fatalf("%d sessions opened, want 1", len(opened))
+	}
+
+	rec := opened[0]
+	if !strings.HasPrefix(rec.ID, "ses-") {
+		t.Errorf("session id = %q, want a ses- prefix", rec.ID)
+	}
+	if rec.UserID != aliceID || rec.UserName != "alice" {
+		t.Errorf("record = %+v, want alice", rec)
+	}
+	if rec.TargetName != "db-1" || rec.Principal != "deploy" {
+		t.Errorf("record = %+v, want db-1 as deploy", rec)
+	}
+	if rec.CredentialID != alice.CredentialID {
+		t.Errorf("credential = %q, want the key that authenticated", rec.CredentialID)
+	}
+	if rec.Recording == "" {
+		t.Error("the record carries no recording path, so the row indexes nothing")
+	}
+	if rec.RemoteAddr == "" {
+		t.Error("the record carries no remote address")
+	}
+
+	end, ok := closed[rec.ID]
+	if !ok {
+		t.Fatalf("session %s was never closed, so it would stay listed as active forever", rec.ID)
+	}
+	if end.RecordedBytes == 0 {
+		t.Error("the close record reports no recorded bytes")
+	}
+}
+
+func TestASessionThatCannotBeRecordedInTheStoreIsRefused(t *testing.T) {
+	ca := newTestCA(t)
+	target := startFakeTarget(t, ca)
+	st, clientKey := registeredAlice(t)
+	st.targets["db-1"] = fakeTargetEntry(t, target)
+	st.openFails = true
+
+	srv, addr := startServerWith(t, st, ca, t.TempDir())
+
+	res := dial(t, srv, addr, "deploy:db-1", clientKey)
+
+	if res.err == nil {
+		t.Fatal("a session opened that no operator could list or close")
+	}
+	if !strings.Contains(res.stderr, "cannot be listed or closed") {
+		t.Fatalf("stderr = %q, want it to say why", res.stderr)
+	}
+	if users, _, _ := target.seen(); len(users) != 0 {
+		t.Fatalf("the target authenticated %d times before the session row existed. An unlistable session is also unkillable",
+			len(users))
+	}
+}
+
+func TestARefusedDialStillClosesItsSessionRow(t *testing.T) {
+	ca := newTestCA(t)
+	target := startFakeTarget(t, ca)
+	st, clientKey := registeredAlice(t)
+	entry := fakeTargetEntry(t, target)
+	entry.HostKey = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(newKeyPair(t).PublicKey())))
+	st.targets["db-1"] = entry
+
+	srv, addr := startServerWith(t, st, ca, t.TempDir())
+
+	if res := dial(t, srv, addr, "deploy:db-1", clientKey); res.err == nil {
+		t.Fatal("the dial should have failed on the host key")
+	}
+
+	opened, closed := st.records()
+	if len(opened) != 1 {
+		t.Fatalf("%d sessions opened, want 1", len(opened))
+	}
+	if _, ok := closed[opened[0].ID]; !ok {
+		t.Fatal("a session whose dial failed was left open in the store, so it would list as active and never close")
+	}
+}
+
+func TestKillClosesALiveSession(t *testing.T) {
+	ca := newTestCA(t)
+	target := startFakeTarget(t, ca)
+	st, clientKey := registeredAlice(t)
+	st.targets["db-1"] = fakeTargetEntry(t, target)
+	srv, addr := startServerWith(t, st, ca, t.TempDir())
+
+	hostKey, _, _, _, err := ssh.ParseAuthorizedKey(ssh.MarshalAuthorizedKey(srv.hostKey))
+	if err != nil {
+		t.Fatalf("parse host key: %v", err)
+	}
+
+	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		User:            "deploy:db-1",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(clientKey)},
+		HostKeyCallback: ssh.FixedHostKey(hostKey),
+		Timeout:         10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer client.Close()
+
+	sshSession, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	if _, err := sshSession.StdinPipe(); err != nil {
+		t.Fatalf("stdin: %v", err)
+	}
+	if err := sshSession.Shell(); err != nil {
+		t.Fatalf("shell: %v", err)
+	}
+
+	waitFor(t, "the session to register as live", func() bool {
+		return srv.LiveSessions() == 1
+	})
+
+	opened, _ := st.records()
+	if len(opened) != 1 {
+		t.Fatalf("%d sessions opened, want 1", len(opened))
+	}
+
+	if !srv.Kill(opened[0].ID) {
+		t.Fatal("Kill reported no live session even though one is registered")
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- sshSession.Wait() }()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the session did not end after being killed")
+	}
+
+	waitFor(t, "the session to deregister", func() bool {
+		return srv.LiveSessions() == 0
+	})
+
+	_, closed := st.records()
+	end, ok := closed[opened[0].ID]
+	if !ok {
+		t.Fatal("a killed session was not closed in the store")
+	}
+	if !strings.Contains(end.Reason, "closed by the gateway") {
+		t.Fatalf("close reason = %q, want it to say the gateway closed it rather than looking like a normal exit",
+			end.Reason)
+	}
+}
+
+func TestKillingAnUnknownSessionReportsFalse(t *testing.T) {
+	st, _ := registeredAlice(t)
+	srv, _ := startServer(t, st)
+
+	if srv.Kill("ses-0000000000000") {
+		t.Fatal("Kill reported success for a session that was never live")
+	}
+}
+
+func TestALiveSessionIsDeregisteredWhenItEndsNormally(t *testing.T) {
+	ca := newTestCA(t)
+	target := startFakeTarget(t, ca)
+	st, clientKey := registeredAlice(t)
+	st.targets["db-1"] = fakeTargetEntry(t, target)
+	srv, addr := startServerWith(t, st, ca, t.TempDir())
+
+	if res := dial(t, srv, addr, "deploy:db-1", clientKey); res.err != nil {
+		t.Fatalf("session failed: %v", res.err)
+	}
+
+	waitFor(t, "the registry to empty", func() bool {
+		return srv.LiveSessions() == 0
 	})
 }

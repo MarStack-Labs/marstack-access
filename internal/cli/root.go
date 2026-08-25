@@ -52,6 +52,7 @@ func newRootCmd() *cobra.Command {
 		newPolicyCmd(g),
 		newRequestCmd(g),
 		newKeyCmd(g),
+		newSessionCmd(g),
 		newCACmd(),
 	)
 	return root

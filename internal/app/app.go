@@ -19,6 +19,7 @@ import (
 	"github.com/marstack-labs/marstack-access/internal/platform/approval"
 	"github.com/marstack-labs/marstack-access/internal/platform/identity"
 	"github.com/marstack-labs/marstack-access/internal/platform/policy"
+	"github.com/marstack-labs/marstack-access/internal/platform/session"
 	"github.com/marstack-labs/marstack-access/internal/platform/system"
 	"github.com/marstack-labs/marstack-access/internal/platform/target"
 	"github.com/marstack-labs/marstack-access/internal/store"
@@ -32,6 +33,10 @@ type Module interface {
 
 type Bootstrapper interface {
 	Bootstrap(ctx context.Context) (string, error)
+}
+
+type Reconciler interface {
+	Reconcile(ctx context.Context) error
 }
 
 const bootstrapTokenFile = "bootstrap-token"
@@ -90,12 +95,20 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 
 	grants := approval.New(st, log, guard, policies)
 
+	sessions := session.New(st, log, guard, session.TerminatorFunc(func(sessionID string) bool {
+		if a.sshd == nil {
+			return false
+		}
+		return a.sshd.Kill(sessionID)
+	}))
+
 	a.modules = []Module{
 		system.New(st, log, guard),
 		idm,
 		targets,
 		policies,
 		grants,
+		sessions,
 	}
 
 	if err := a.migrate(ctx); err != nil {
@@ -104,6 +117,11 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	}
 
 	if err := a.bootstrap(ctx); err != nil {
+		st.Close()
+		return nil, err
+	}
+
+	if err := a.reconcile(ctx); err != nil {
 		st.Close()
 		return nil, err
 	}
@@ -121,7 +139,8 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 				DataDir:     cfg.DataDir,
 				AdvertiseIP: cfg.AdvertiseIP,
 			},
-			log, idm, targetLookup(targets), policies, grants, signer)
+			log, idm, targetLookup(targets), policies, grants, signer,
+			sessionOpener(sessions), sessionCloser(sessions))
 		if err != nil {
 			st.Close()
 			return nil, err
@@ -140,6 +159,32 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	}
 
 	return a, nil
+}
+
+func sessionOpener(sessions *session.Module) sshd.SessionOpener {
+	return func(ctx context.Context, s sshd.SessionOpened) error {
+		return sessions.Open(ctx, session.OpenInput{
+			ID:           s.ID,
+			UserID:       s.UserID,
+			UserName:     s.UserName,
+			TargetID:     s.TargetID,
+			TargetName:   s.TargetName,
+			Principal:    s.Principal,
+			CredentialID: s.CredentialID,
+			RemoteAddr:   s.RemoteAddr,
+			Recording:    s.Recording,
+		})
+	}
+}
+
+func sessionCloser(sessions *session.Module) sshd.SessionCloser {
+	return func(ctx context.Context, id string, s sshd.SessionClosed) error {
+		return sessions.Close(ctx, id, session.CloseInput{
+			ExitCode:      s.ExitCode,
+			Reason:        s.Reason,
+			RecordedBytes: s.RecordedBytes,
+		})
+	}
 }
 
 func loadSigner(cfg Config, log *slog.Logger) (certs.Signer, error) {
@@ -215,6 +260,19 @@ func (a *App) bootstrap(ctx context.Context) error {
 		}
 		a.log.Warn("bootstrap credential created, read it and delete the file",
 			"module", m.Name(), "path", path)
+	}
+	return nil
+}
+
+func (a *App) reconcile(ctx context.Context) error {
+	for _, m := range a.modules {
+		r, ok := m.(Reconciler)
+		if !ok {
+			continue
+		}
+		if err := r.Reconcile(ctx); err != nil {
+			return fmt.Errorf("reconcile %s: %w", m.Name(), err)
+		}
 	}
 	return nil
 }
