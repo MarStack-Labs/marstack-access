@@ -237,6 +237,38 @@ was confirmed to fail with the second check removed.
 **Two overlapping grants resolve to the longer one.** The query orders by expiry descending, so a
 later, longer approval extends access rather than being shadowed by an earlier short one.
 
+## SSH public keys
+
+An API token authenticates a caller to the control plane. An SSH public key will authenticate a user
+to the data plane, because that is how SSH clients already work and it means no secret crosses the
+wire at all.
+
+**A fingerprint is globally unique.** Two accounts cannot register the same key. If they could, a
+connection would resolve to two identities and the platform could not say who acted — which is the
+one thing an access platform exists to answer.
+
+**Weak and deprecated algorithms are refused at registration.** `ssh-dss` is not in the accepted
+set, and an RSA key under 2048 bits is rejected with its actual bit length in the message. Refusing
+at registration rather than at connection time means the operator learns immediately, from the
+person adding the key, rather than from a failed session weeks later.
+
+**A key carries no privilege of its own.** It resolves to an account, and the account's role and
+policies decide everything. Registering a key never changes what an account may do.
+
+**The stored `authorized_key` line never appears in a response.** Listings carry the fingerprint,
+which is what an operator needs to match a key to a client, and nothing that could be replayed
+elsewhere. A public key is not a secret, but echoing key material back is how inventories become
+copies of things better kept in one place.
+
+**Fingerprints are `ssh.FingerprintSHA256`, verified against `ssh-keygen -lf`.** The value an
+operator sees in `marac key list` is byte-identical to what their own tooling prints, so matching a
+key by eye is reliable. That was checked against a real generated key rather than assumed.
+
+**The CLI takes a key on stdin rather than opening a path.** `gosec` flagged the file read as G304,
+and the fix was to remove the file open rather than annotate it — an exclusion for path handling in
+the CLI would also hide a real traversal bug in server code later. Piping is also the better Unix
+design: the key can come from a file, a clipboard, or `ssh-add -L`.
+
 ## Bootstrap
 
 On a store with no users, the first start creates an `admin` user, issues it a token, and writes the

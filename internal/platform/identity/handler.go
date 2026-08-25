@@ -179,3 +179,71 @@ func (m *Module) handleRevokeToken(w http.ResponseWriter, r *http.Request) error
 	httpx.Write(w, http.StatusNoContent, nil)
 	return nil
 }
+
+type addKeyRequest struct {
+	Name      string `json:"name"`
+	PublicKey string `json:"public_key"`
+}
+
+type keyView struct {
+	ID          string `json:"id"`
+	UserID      string `json:"user_id"`
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Fingerprint string `json:"fingerprint"`
+	CreatedAt   string `json:"created_at"`
+}
+
+type keyListView struct {
+	Keys []keyView `json:"keys"`
+}
+
+func keyViewOf(k Key) keyView {
+	return keyView{
+		ID:          k.ID,
+		UserID:      k.UserID,
+		Name:        k.Name,
+		Type:        k.Type,
+		Fingerprint: k.Fingerprint,
+		CreatedAt:   k.CreatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func (m *Module) handleAddKey(w http.ResponseWriter, r *http.Request) error {
+	req, err := httpx.Decode[addKeyRequest](w, r)
+	if err != nil {
+		return err
+	}
+
+	k, err := m.service.addKey(r.Context(), r.PathValue("id"), AddKeyInput(req))
+	if err != nil {
+		return err
+	}
+
+	httpx.Write(w, http.StatusCreated, keyViewOf(k))
+	return nil
+}
+
+func (m *Module) handleListKeys(w http.ResponseWriter, r *http.Request) error {
+	keys, err := m.service.listKeys(r.Context(), r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+
+	views := make([]keyView, 0, len(keys))
+	for _, k := range keys {
+		views = append(views, keyViewOf(k))
+	}
+
+	httpx.Write(w, http.StatusOK, keyListView{Keys: views})
+	return nil
+}
+
+func (m *Module) handleRemoveKey(w http.ResponseWriter, r *http.Request) error {
+	if err := m.service.removeKey(r.Context(), r.PathValue("id")); err != nil {
+		return err
+	}
+
+	httpx.Write(w, http.StatusNoContent, nil)
+	return nil
+}

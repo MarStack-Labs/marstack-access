@@ -79,7 +79,7 @@ Every route except `GET /healthz` needs a token. Roles are ranked, and a check m
 | `marac target …` | `operator` |
 | `marac request create/list/get/cancel` | `operator` |
 | `marac request approve/deny/grant` | `admin` |
-| `marac user …`, `marac token …`, `marac policy …` | `admin` |
+| `marac user …`, `marac token …`, `marac key …`, `marac policy …` | `admin` |
 
 Create a working account rather than using the bootstrap admin for daily work:
 
@@ -171,6 +171,20 @@ control working rather than a bug.
 
 Grants are time-boxed and expiry is derived from the clock, so there is no background job that can
 stop running and leave access open.
+
+Register the SSH public key an account will connect with. The key is piped in, so it can come from a
+file, a clipboard, or `ssh-add -L`:
+
+```sh
+marac key add --user usr-xxxxxxxxxxxxx --name laptop < ~/.ssh/id_ed25519.pub
+marac key list --user usr-xxxxxxxxxxxxx
+marac key remove key-xxxxxxxxxxxxx
+```
+
+The fingerprint shown matches `ssh-keygen -lf` exactly, so a key can be matched by eye. A key may
+belong to only one account, and `ssh-dss` and RSA under 2048 bits are refused when the key is added
+rather than when a session fails. A key carries no privilege of its own — the account's role and
+policies decide everything.
 
 The client talks to `$MARAC_ENDPOINT`, or `--endpoint`, or loopback. `--output json` prints the raw
 API response for scripting:

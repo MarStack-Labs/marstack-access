@@ -181,10 +181,10 @@ func (s *service) authenticate(ctx context.Context, secret string) (authz.Identi
 	}
 
 	return authz.Identity{
-		UserID:  rec.UserID,
-		Name:    rec.userName,
-		Role:    rec.userRole,
-		TokenID: rec.ID,
+		UserID:       rec.UserID,
+		Name:         rec.userName,
+		Role:         rec.userRole,
+		CredentialID: rec.ID,
 	}, nil
 }
 
@@ -211,4 +211,96 @@ func (s *service) bootstrap(ctx context.Context) (string, error) {
 
 func userNotFound() error {
 	return fault.NotFound("user_not_found", "no user with that id exists")
+}
+
+func (s *service) addKey(ctx context.Context, userID string, in AddKeyInput) (Key, error) {
+	if _, err := s.getUser(ctx, userID); err != nil {
+		return Key{}, err
+	}
+	if err := validate.Name("name", in.Name); err != nil {
+		return Key{}, err
+	}
+
+	parsed, err := parsePublicKey(in.PublicKey)
+	if err != nil {
+		return Key{}, err
+	}
+
+	k := Key{
+		ID:          ids.New(keyIDPrefix),
+		UserID:      userID,
+		Name:        in.Name,
+		Type:        parsed.Type,
+		Fingerprint: parsed.Fingerprint,
+		Authorized:  parsed.Authorized,
+		CreatedAt:   s.now(),
+	}
+
+	switch err := s.repo.insertKey(ctx, k); {
+	case errors.Is(err, errFingerprintTaken):
+		return Key{}, fault.Conflict("public_key_registered",
+			"that public key is already registered, and a key must resolve to one identity")
+	case errors.Is(err, errKeyNameTaken):
+		return Key{}, fault.Conflict("key_name_taken", "this user already has a key with that name")
+	case err != nil:
+		return Key{}, fault.Internal(err)
+	}
+
+	return k, nil
+}
+
+func (s *service) listKeys(ctx context.Context, userID string) ([]Key, error) {
+	if _, err := s.getUser(ctx, userID); err != nil {
+		return nil, err
+	}
+
+	keys, err := s.repo.listKeys(ctx, userID)
+	if err != nil {
+		return nil, fault.Internal(err)
+	}
+	return keys, nil
+}
+
+func (s *service) removeKey(ctx context.Context, id string) error {
+	if !ids.HasPrefix(id, keyIDPrefix) {
+		return fault.Invalid("invalid_id", "a key id looks like "+keyIDPrefix+"-<random>")
+	}
+
+	deleted, err := s.repo.deleteKey(ctx, id)
+	switch {
+	case err != nil:
+		return fault.Internal(err)
+	case !deleted:
+		return fault.NotFound("key_not_found", "no key with that id exists")
+	}
+	return nil
+}
+
+func (s *service) byPublicKey(ctx context.Context, fingerprint string) (authz.Identity, error) {
+	if fingerprint == "" {
+		return authz.Identity{}, unknownKey()
+	}
+
+	u, keyID, err := s.repo.userByKeyFingerprint(ctx, fingerprint)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return authz.Identity{}, unknownKey()
+	case err != nil:
+		return authz.Identity{}, fault.Internal(err)
+	}
+
+	if u.Disabled {
+		return authz.Identity{}, unknownKey()
+	}
+
+	return authz.Identity{
+		UserID:       u.ID,
+		Name:         u.Name,
+		Role:         u.Role,
+		CredentialID: keyID,
+	}, nil
+}
+
+func unknownKey() error {
+	return fault.Unauthenticated("unknown_key", "that public key is not registered")
 }

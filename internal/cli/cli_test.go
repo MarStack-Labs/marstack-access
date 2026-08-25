@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,6 +19,20 @@ func run(t *testing.T, args ...string) (string, error) {
 	root := newRootCmd()
 	root.SetOut(&out)
 	root.SetErr(&out)
+	root.SetArgs(args)
+
+	err := root.Execute()
+	return out.String(), err
+}
+
+func runWithStdin(t *testing.T, stdin io.Reader, args ...string) (string, error) {
+	t.Helper()
+
+	var out bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetIn(stdin)
 	root.SetArgs(args)
 
 	err := root.Execute()
@@ -908,5 +923,127 @@ func TestRequestGrantShowsTheReasonWhenActive(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q: %s", want, out)
 		}
+	}
+}
+
+func TestKeyAddSendsTheAuthorizedKeysLine(t *testing.T) {
+	var received map[string]any
+
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if want := "/v1/users/usr-abc/keys"; r.URL.Path != want {
+			t.Errorf("path = %q, want %q", r.URL.Path, want)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		writeJSON(t, w, http.StatusCreated, keyView{
+			ID: "key-abc", UserID: "usr-abc", Name: "laptop",
+			Type: "ssh-ed25519", Fingerprint: "SHA256:abc",
+		})
+	})
+
+	out, err := runAgainst(t, endpoint, "key", "add",
+		"--user", "usr-abc", "--name", "laptop", "--public-key", "ssh-ed25519 AAAAC3Nz alice@laptop")
+	if err != nil {
+		t.Fatalf("unexpected error: %v (%s)", err, out)
+	}
+	if received["public_key"] != "ssh-ed25519 AAAAC3Nz alice@laptop" {
+		t.Fatalf("public_key = %v", received["public_key"])
+	}
+	if !strings.Contains(out, "SHA256:abc") {
+		t.Errorf("output does not show the fingerprint: %s", out)
+	}
+}
+
+func TestKeyAddReadsStdin(t *testing.T) {
+	var received map[string]any
+
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		writeJSON(t, w, http.StatusCreated, keyView{ID: "key-abc"})
+	})
+
+	out, err := runWithStdin(t, strings.NewReader("ssh-ed25519 AAAAC3Nz alice@laptop\n"),
+		"--endpoint", endpoint, "key", "add", "--user", "usr-abc", "--name", "laptop")
+	if err != nil {
+		t.Fatalf("unexpected error: %v (%s)", err, out)
+	}
+	if received["public_key"] != "ssh-ed25519 AAAAC3Nz alice@laptop" {
+		t.Fatalf("public_key = %q, want the piped key trimmed", received["public_key"])
+	}
+}
+
+func TestKeyAddRefusesAnEmptyPipe(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("the control plane must not be called with no key")
+	})
+
+	if _, err := runWithStdin(t, strings.NewReader("   \n"),
+		"--endpoint", endpoint, "key", "add", "--user", "usr-abc", "--name", "k"); err == nil {
+		t.Fatal("expected an error for an empty pipe")
+	}
+}
+
+func TestKeyAddCapsThePipedKeySize(t *testing.T) {
+	var received map[string]any
+
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		writeJSON(t, w, http.StatusCreated, keyView{ID: "key-abc"})
+	})
+
+	oversized := strings.Repeat("A", maxPipedKeyBytes*2)
+	if _, err := runWithStdin(t, strings.NewReader(oversized),
+		"--endpoint", endpoint, "key", "add", "--user", "usr-abc", "--name", "k"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sent, _ := received["public_key"].(string)
+	if len(sent) > maxPipedKeyBytes {
+		t.Fatalf("sent %d bytes, want at most %d: stdin is attacker-controlled length in a pipeline",
+			len(sent), maxPipedKeyBytes)
+	}
+}
+
+func TestKeyListShowsFingerprintsAndNoKeyMaterial(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, keyListView{Keys: []keyView{
+			{ID: "key-abc", UserID: "usr-abc", Name: "laptop",
+				Type: "ssh-ed25519", Fingerprint: "SHA256:abc", CreatedAt: "2026-08-25T10:00:00Z"},
+		}})
+	})
+
+	out, err := runAgainst(t, endpoint, "key", "list", "--user", "usr-abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{"FINGERPRINT", "SHA256:abc", "ssh-ed25519", "laptop"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "AAAAC3Nz") {
+		t.Errorf("the listing shows key material: %s", out)
+	}
+}
+
+func TestKeyRemoveConfirms(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/keys/key-abc" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	out, err := runAgainst(t, endpoint, "key", "remove", "key-abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "removed key-abc") {
+		t.Fatalf("output = %q, want a removal confirmation", out)
 	}
 }

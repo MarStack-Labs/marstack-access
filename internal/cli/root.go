@@ -51,6 +51,7 @@ func newRootCmd() *cobra.Command {
 		newTokenCmd(g),
 		newPolicyCmd(g),
 		newRequestCmd(g),
+		newKeyCmd(g),
 	)
 	return root
 }
@@ -62,6 +63,8 @@ func Execute() error {
 var (
 	errNoSubject    = errors.New("one of --user or --role is required")
 	errBothSubjects = errors.New("--user and --role are mutually exclusive: a policy has one subject")
+
+	errNoKeySource = errors.New("pass the key with --public-key or pipe it on stdin")
 )
 
 func must(err error) {

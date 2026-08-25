@@ -81,7 +81,7 @@ func TestCoversRejectsAnUnknownRoleOnEitherSide(t *testing.T) {
 }
 
 func TestRequirePassesTheIdentityToTheHandler(t *testing.T) {
-	want := Identity{UserID: "usr-abc", Name: "umar", Role: RoleAdmin, TokenID: "tok-abc"}
+	want := Identity{UserID: "usr-abc", Name: "umar", Role: RoleAdmin, CredentialID: "tok-abc"}
 	var seen Identity
 
 	rec := call(t, guardFor(want, nil).Require(RoleOperator, okHandler(&seen)), "Bearer mat_a_b")

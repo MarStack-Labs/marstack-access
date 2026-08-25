@@ -39,10 +39,10 @@ func Covers(held, required string) bool {
 }
 
 type Identity struct {
-	UserID  string
-	Name    string
-	Role    string
-	TokenID string
+	UserID       string
+	Name         string
+	Role         string
+	CredentialID string
 }
 
 type contextKey int

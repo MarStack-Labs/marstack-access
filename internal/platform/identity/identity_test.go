@@ -2,11 +2,17 @@ package identity
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
@@ -117,7 +123,7 @@ func TestAuthenticateAcceptsAFreshToken(t *testing.T) {
 		t.Fatalf("authenticate: %v", err)
 	}
 
-	if id.UserID != u.ID || id.Name != "umar" || id.Role != authz.RoleOperator || id.TokenID != tok.ID {
+	if id.UserID != u.ID || id.Name != "umar" || id.Role != authz.RoleOperator || id.CredentialID != tok.ID {
 		t.Fatalf("identity = %+v, want it to name the user and the token used", id)
 	}
 }
@@ -387,12 +393,220 @@ func TestIdentityCarriesNoSecretMaterial(t *testing.T) {
 		t.Fatalf("authenticate: %v", err)
 	}
 
-	rendered := id.UserID + id.Name + id.Role + id.TokenID
+	rendered := id.UserID + id.Name + id.Role + id.CredentialID
 	if strings.Contains(rendered, secret) {
 		t.Fatal("the identity carries the secret, so anything that logs an identity logs a credential")
 	}
 	parts, _ := parseSecret(secret)
 	if strings.Contains(rendered, parts.verifier) {
 		t.Fatal("the identity carries the verifier")
+	}
+}
+
+func generateKey(t *testing.T) string {
+	t.Helper()
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	return string(ssh.MarshalAuthorizedKey(signer.PublicKey()))
+}
+
+func mustAddKey(t *testing.T, m *Module, userID, name, raw string) Key {
+	t.Helper()
+
+	k, err := m.service.addKey(context.Background(), userID, AddKeyInput{Name: name, PublicKey: raw})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	return k
+}
+
+func TestAKeyResolvesToItsOwner(t *testing.T) {
+	m, _ := newTestModule(t)
+	u := mustCreateUser(t, m, "alice", authz.RoleOperator)
+	raw := generateKey(t)
+	k := mustAddKey(t, m, u.ID, "laptop", raw)
+
+	id, err := m.ByPublicKey(context.Background(), k.Fingerprint)
+	if err != nil {
+		t.Fatalf("by public key: %v", err)
+	}
+	if id.UserID != u.ID || id.Role != authz.RoleOperator {
+		t.Fatalf("identity = %+v, want alice the operator", id)
+	}
+	if id.CredentialID != k.ID {
+		t.Fatalf("credential = %q, want the key id %q so an audit line names what was used",
+			id.CredentialID, k.ID)
+	}
+}
+
+func TestOneKeyCannotBelongToTwoUsers(t *testing.T) {
+	m, _ := newTestModule(t)
+	alice := mustCreateUser(t, m, "alice", authz.RoleOperator)
+	bob := mustCreateUser(t, m, "bob", authz.RoleAdmin)
+	raw := generateKey(t)
+
+	mustAddKey(t, m, alice.ID, "laptop", raw)
+
+	_, err := m.service.addKey(context.Background(), bob.ID, AddKeyInput{Name: "laptop", PublicKey: raw})
+	got := faultOf(t, err)
+	if got.Kind != fault.KindConflict || got.Code != "public_key_registered" {
+		t.Fatalf("fault = %+v, want a public_key_registered conflict. If one key resolved to two users, the platform could not say who acted",
+			got)
+	}
+}
+
+func TestAUserMayHoldSeveralKeys(t *testing.T) {
+	m, _ := newTestModule(t)
+	u := mustCreateUser(t, m, "alice", authz.RoleOperator)
+	ctx := context.Background()
+
+	first := mustAddKey(t, m, u.ID, "laptop", generateKey(t))
+	second := mustAddKey(t, m, u.ID, "yubikey", generateKey(t))
+
+	for _, k := range []Key{first, second} {
+		if _, err := m.ByPublicKey(ctx, k.Fingerprint); err != nil {
+			t.Errorf("key %q does not authenticate: %v", k.Name, err)
+		}
+	}
+
+	if _, err := m.service.addKey(ctx, u.ID, AddKeyInput{Name: "laptop", PublicKey: generateKey(t)}); err == nil {
+		t.Error("a second key reused the name laptop for the same user")
+	}
+}
+
+func TestAWeakOrUnsupportedKeyIsRefused(t *testing.T) {
+	m, _ := newTestModule(t)
+	u := mustCreateUser(t, m, "alice", authz.RoleOperator)
+	ctx := context.Background()
+
+	weak, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatalf("generate rsa: %v", err)
+	}
+	weakSigner, err := ssh.NewSignerFromKey(weak)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+
+	cases := map[string]string{
+		"not a key":     "hello world",
+		"empty":         "",
+		"private key":   "-----BEGIN OPENSSH PRIVATE KEY-----\nnope\n-----END OPENSSH PRIVATE KEY-----",
+		"rsa 1024 bits": string(ssh.MarshalAuthorizedKey(weakSigner.PublicKey())),
+	}
+
+	for label, raw := range cases {
+		_, err := m.service.addKey(ctx, u.ID, AddKeyInput{Name: "k", PublicKey: raw})
+		if got := faultOf(t, err); got.Kind != fault.KindInvalid {
+			t.Errorf("%s: kind = %v, want KindInvalid", label, got.Kind)
+		}
+	}
+}
+
+func TestAStrongRSAKeyIsAccepted(t *testing.T) {
+	m, _ := newTestModule(t)
+	u := mustCreateUser(t, m, "alice", authz.RoleOperator)
+
+	strong, err := rsa.GenerateKey(rand.Reader, minRSABits)
+	if err != nil {
+		t.Fatalf("generate rsa: %v", err)
+	}
+	signer, err := ssh.NewSignerFromKey(strong)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+
+	mustAddKey(t, m, u.ID, "old-laptop", string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+}
+
+func TestAnUnknownFingerprintIsRefusedUniformly(t *testing.T) {
+	m, _ := newTestModule(t)
+	u := mustCreateUser(t, m, "alice", authz.RoleOperator)
+	k := mustAddKey(t, m, u.ID, "laptop", generateKey(t))
+	ctx := context.Background()
+
+	want := faultOf(t, unknownKey())
+
+	for label, fingerprint := range map[string]string{
+		"empty":        "",
+		"garbage":      "SHA256:not-a-real-fingerprint",
+		"almost":       k.Fingerprint + "x",
+		"unregistered": "SHA256:" + strings.Repeat("A", 43),
+	} {
+		_, err := m.ByPublicKey(ctx, fingerprint)
+		got := faultOf(t, err)
+		if got.Code != want.Code || got.Message != want.Message {
+			t.Errorf("%s: fault = {%s %q}, want {%s %q}", label, got.Code, got.Message, want.Code, want.Message)
+		}
+	}
+}
+
+func TestRemovingAKeyStopsItAuthenticating(t *testing.T) {
+	m, _ := newTestModule(t)
+	u := mustCreateUser(t, m, "alice", authz.RoleOperator)
+	ctx := context.Background()
+	k := mustAddKey(t, m, u.ID, "laptop", generateKey(t))
+
+	if err := m.service.removeKey(ctx, k.ID); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if _, err := m.ByPublicKey(ctx, k.Fingerprint); err == nil {
+		t.Fatal("a removed key still authenticates")
+	}
+	if err := m.service.removeKey(ctx, k.ID); err == nil {
+		t.Error("a second removal reported success it did not perform")
+	}
+}
+
+func TestDeletingAUserRemovesItsKeys(t *testing.T) {
+	m, _ := newTestModule(t)
+	u := mustCreateUser(t, m, "alice", authz.RoleOperator)
+	ctx := context.Background()
+	k := mustAddKey(t, m, u.ID, "laptop", generateKey(t))
+
+	if err := m.service.deleteUser(ctx, u.ID); err != nil {
+		t.Fatalf("delete user: %v", err)
+	}
+	if _, err := m.ByPublicKey(ctx, k.Fingerprint); err == nil {
+		t.Fatal("a deleted user's key still authenticates")
+	}
+}
+
+func TestTheKeyViewNeverCarriesTheKeyMaterial(t *testing.T) {
+	m, _ := newTestModule(t)
+	u := mustCreateUser(t, m, "alice", authz.RoleOperator)
+	raw := generateKey(t)
+	k := mustAddKey(t, m, u.ID, "laptop", raw)
+
+	encoded, err := json.Marshal(keyViewOf(k))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(encoded), "ssh-ed25519 ") {
+		t.Fatalf("the view carries the authorized_keys line: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), k.Fingerprint) {
+		t.Fatalf("the view has no fingerprint, so an operator cannot match it to a client: %s", encoded)
+	}
+}
+
+func TestAFreshKeyGrantsNoAccessByItself(t *testing.T) {
+	m, _ := newTestModule(t)
+	u := mustCreateUser(t, m, "alice", authz.RoleViewer)
+	k := mustAddKey(t, m, u.ID, "laptop", generateKey(t))
+
+	id, err := m.ByPublicKey(context.Background(), k.Fingerprint)
+	if err != nil {
+		t.Fatalf("by public key: %v", err)
+	}
+	if id.Role != authz.RoleViewer {
+		t.Fatalf("role = %q, want the user's own role: registering a key must not change what the account may do", id.Role)
 	}
 }

@@ -236,3 +236,122 @@ func boolToInt(v bool) int {
 	}
 	return 0
 }
+
+func (r *repository) insertKey(ctx context.Context, k Key) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var used int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM user_keys WHERE fingerprint = ?`, k.Fingerprint,
+	).Scan(&used); err != nil {
+		return fmt.Errorf("check fingerprint: %w", err)
+	}
+	if used > 0 {
+		return errFingerprintTaken
+	}
+
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM user_keys WHERE user_id = ? AND name = ?`, k.UserID, k.Name,
+	).Scan(&used); err != nil {
+		return fmt.Errorf("check key name: %w", err)
+	}
+	if used > 0 {
+		return errKeyNameTaken
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO user_keys (id, user_id, name, key_type, fingerprint, authorized_key, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		k.ID, k.UserID, k.Name, k.Type, k.Fingerprint, k.Authorized,
+		k.CreatedAt.UTC().Format(time.RFC3339),
+	); err != nil {
+		return fmt.Errorf("insert key: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+func (r *repository) listKeys(ctx context.Context, userID string) ([]Key, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, user_id, name, key_type, fingerprint, authorized_key, created_at
+		 FROM user_keys WHERE user_id = ? ORDER BY name`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list keys: %w", err)
+	}
+	defer rows.Close()
+
+	keys := []Key{}
+	for rows.Next() {
+		k, err := scanKey(rows)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate keys: %w", err)
+	}
+	return keys, nil
+}
+
+func (r *repository) deleteKey(ctx context.Context, id string) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM user_keys WHERE id = ?`, id)
+	if err != nil {
+		return false, fmt.Errorf("delete key: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("rows affected: %w", err)
+	}
+	return affected > 0, nil
+}
+
+func (r *repository) userByKeyFingerprint(ctx context.Context, fingerprint string) (User, string, error) {
+	var (
+		u         User
+		keyID     string
+		disabled  int
+		createdAt string
+	)
+
+	err := r.db.QueryRowContext(ctx,
+		`SELECT u.id, u.name, u.role, u.disabled, u.created_at, k.id
+		 FROM user_keys k JOIN users u ON u.id = k.user_id
+		 WHERE k.fingerprint = ?`, fingerprint,
+	).Scan(&u.ID, &u.Name, &u.Role, &disabled, &createdAt, &keyID)
+	if err != nil {
+		return User{}, "", err
+	}
+
+	parsed, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return User{}, "", fmt.Errorf("parse created_at: %w", err)
+	}
+	u.Disabled = disabled != 0
+	u.CreatedAt = parsed
+
+	return u, keyID, nil
+}
+
+func scanKey(row scanner) (Key, error) {
+	var (
+		k         Key
+		createdAt string
+	)
+
+	if err := row.Scan(&k.ID, &k.UserID, &k.Name, &k.Type, &k.Fingerprint,
+		&k.Authorized, &createdAt); err != nil {
+		return Key{}, err
+	}
+
+	parsed, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return Key{}, fmt.Errorf("parse created_at: %w", err)
+	}
+	k.CreatedAt = parsed
+	return k, nil
+}
