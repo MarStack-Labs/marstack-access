@@ -1,5 +1,6 @@
 bin/
 data/
+bootstrap-token
 *.db
 *.db-shm
 *.db-wal

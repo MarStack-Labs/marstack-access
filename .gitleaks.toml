@@ -3,6 +3,13 @@ title = "marstack-access"
 [extend]
 useDefault = true
 
+[[rules]]
+id = "marstack-access-token"
+description = "MarStack Access API token"
+regex = '''mat_[0-9abcdefghjkmnpqrstvwxyz]{16}_[0-9abcdefghjkmnpqrstvwxyz]{32}'''
+keywords = ["mat_"]
+entropy = 3.0
+
 [allowlist]
 description = "Paths that never carry real credentials"
 paths = [

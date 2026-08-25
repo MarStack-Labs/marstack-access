@@ -94,6 +94,55 @@ non-negotiable.
 - **A parser reads from an untrusted peer with a bounded buffer.** Protocol code caps every length
   it reads before allocating.
 
+## API tokens
+
+A token is `mat_<selector>_<verifier>`: a 4-character prefix, an 80-bit selector, and a 160-bit
+verifier, all from `crypto/rand`.
+
+**Lookup is by selector, comparison is on the verifier.** The selector is stored in plaintext under
+a unique index, so finding the row is one indexed read. The verifier is stored as a SHA-256 digest
+and compared with `crypto/subtle.ConstantTimeCompare`.
+
+The obvious simpler design — hash the whole token, index the hash, look it up — also works and is
+one column shorter. It was rejected for two reasons. It hands the secret comparison to SQLite, so
+the constant-time rule in this document would be documented and never exercised. And it leaves
+nothing safe to write down: the selector is a non-secret handle that can appear in a log line or an
+audit record to name *which* token acted, and a hash-only scheme has no such handle.
+
+**SHA-256, not bcrypt or argon2.** Slow hashing exists to make low-entropy human passwords
+expensive to guess. The verifier is 160 bits of random data, so a slow hash would add latency to
+every authenticated request and remove nothing an attacker could otherwise do. Using argon2 here
+would look more careful and be strictly worse.
+
+**Every authentication failure is the same failure.** Malformed, unknown selector, wrong verifier,
+expired, revoked, and disabled user all return one code and one message. A distinguishable response
+tells an attacker that the selector half was correct, which turns one unguessable secret into two
+guessable ones. There is a table-driven test asserting all six are byte-identical.
+
+**The secret is returned once, at issue, and never again.** Nothing stores it, nothing logs it, and
+no response can produce it a second time. Losing it means issuing a new one.
+
+**A recognisable prefix is a security feature.** `mat_` makes a leaked token detectable by a secret
+scanner that has never heard of this project. `.gitleaks.toml` carries a rule for the format, so a
+token pasted into this repository fails the commit. The rule was verified against a token the
+running binary actually issued, because a scanner rule that matches nothing is worse than no rule —
+it reports success.
+
+## Bootstrap
+
+On a store with no users, the first start creates an `admin` user, issues it a token, and writes the
+secret to `<data-dir>/bootstrap-token` with mode `0600`. The log records the **path**, never the
+secret, because invariant 9 applies to the bootstrap path too.
+
+Writing to a file rather than printing to the log is what makes possession of the credential mean
+something: reading it proves filesystem access to the host, which is the same privilege needed to
+read the database anyway. It also means the credential is not duplicated into whatever aggregates
+the logs.
+
+Bootstrap runs only when the user count is zero, so a restart does not mint a second admin, and
+deleting the file after use closes the window. There is a test asserting the second start writes
+nothing.
+
 ## Excluded by design
 
 These are not backlog items. Each was considered and rejected, and re-proposing one means arguing

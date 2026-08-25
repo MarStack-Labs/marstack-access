@@ -164,12 +164,33 @@ Modules are added one at a time, each with its own migrations and routes:
 ```
 system      health, version                                        done
 target      the SSH target inventory                               done
-identity    users, roles, console sessions
+identity    users, roles, API tokens                               storage done, no routes yet
 policy      who may reach which target as which principal
 approval    JIT request, approve, time-boxed grant
 session     the live session record and the kill switch
 audit       the append-only event trail and the recording index
 ```
+
+`identity` deliberately registers no HTTP routes yet. Invariant 1 in
+[`SECURITY.md`](SECURITY.md) says an endpoint is unreachable until it declares who may call it, and
+the authorization middleware does not exist. Exposing `POST /v1/users` before it would mean anyone
+who can reach the port can create an admin. The routes and the middleware land together.
+
+## Bootstrap and optional module capabilities
+
+A module may need to run once at startup, before it serves anything. Rather than widen `Module` and
+force every module to implement a method it does not need, `app` looks for an optional interface:
+
+```go
+type Bootstrapper interface {
+	Bootstrap(ctx context.Context) (string, error)
+}
+```
+
+`identity` implements it and returns the bootstrap secret, or an empty string when there is nothing
+to do. `app` owns the filesystem — it holds `DataDir` — so `app` writes the secret to a `0600` file
+and logs the path. The module never touches the disk, and adding a second bootstrapping module
+requires editing neither `Module` nor any existing module.
 
 The data plane lands as a second subcommand once `target` and `policy` exist, under
 `internal/dataplane`, with one seam:

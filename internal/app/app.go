@@ -3,11 +3,15 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
+	"github.com/marstack-labs/marstack-access/internal/platform/identity"
 	"github.com/marstack-labs/marstack-access/internal/platform/system"
 	"github.com/marstack-labs/marstack-access/internal/platform/target"
 	"github.com/marstack-labs/marstack-access/internal/store"
@@ -18,6 +22,12 @@ type Module interface {
 	Migrations() []store.Migration
 	Routes(mux *http.ServeMux)
 }
+
+type Bootstrapper interface {
+	Bootstrap(ctx context.Context) (string, error)
+}
+
+const bootstrapTokenFile = "bootstrap-token"
 
 type Config struct {
 	Listen         string
@@ -58,10 +68,16 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	a := &App{cfg: cfg, log: log, store: st}
 	a.modules = []Module{
 		system.New(st, log),
+		identity.New(st, log),
 		target.New(st, log),
 	}
 
 	if err := a.migrate(ctx); err != nil {
+		st.Close()
+		return nil, err
+	}
+
+	if err := a.bootstrap(ctx); err != nil {
 		st.Close()
 		return nil, err
 	}
@@ -93,6 +109,31 @@ func (a *App) migrate(ctx context.Context) error {
 		return err
 	}
 	a.log.Info("store ready", "dir", a.cfg.DataDir, "migrations", len(all))
+	return nil
+}
+
+func (a *App) bootstrap(ctx context.Context) error {
+	for _, m := range a.modules {
+		b, ok := m.(Bootstrapper)
+		if !ok {
+			continue
+		}
+
+		secret, err := b.Bootstrap(ctx)
+		if err != nil {
+			return fmt.Errorf("bootstrap %s: %w", m.Name(), err)
+		}
+		if secret == "" {
+			continue
+		}
+
+		path := filepath.Join(a.cfg.DataDir, bootstrapTokenFile)
+		if err := os.WriteFile(path, []byte(secret+"\n"), 0o600); err != nil {
+			return fmt.Errorf("write bootstrap token: %w", err)
+		}
+		a.log.Warn("bootstrap credential created, read it and delete the file",
+			"module", m.Name(), "path", path)
+	}
 	return nil
 }
 

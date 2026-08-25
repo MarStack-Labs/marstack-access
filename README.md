@@ -61,6 +61,18 @@ The control plane binds `127.0.0.1:7443` by default and creates its database und
 binds loopback rather than every interface on purpose — exposing it is a deployment decision, not a
 default.
 
+On the first start against an empty store it creates an `admin` user and writes that account's token
+to `./data/bootstrap-token` with mode `0600`. The log names the path, never the secret. Read it, then
+delete the file:
+
+```sh
+cat data/bootstrap-token
+rm data/bootstrap-token
+```
+
+A restart does not issue a second one. Nothing consumes the token yet — the authentication
+middleware lands with the identity endpoints.
+
 ```sh
 curl -s localhost:7443/healthz
 curl -s localhost:7443/v1/version

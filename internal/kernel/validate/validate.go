@@ -67,6 +67,15 @@ func Port(field string, value int) error {
 	return nil
 }
 
+func OneOf(field, value string, allowed ...string) error {
+	for _, a := range allowed {
+		if value == a {
+			return nil
+		}
+	}
+	return invalid(field, "%s must be one of: %s", field, strings.Join(allowed, ", "))
+}
+
 func Principal(field, value string) error {
 	if value == "" {
 		return invalid(field, "%s must not be empty", field)
