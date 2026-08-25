@@ -165,7 +165,7 @@ Modules are added one at a time, each with its own migrations and routes:
 system      health, version                                        done
 target      the SSH target inventory                               done
 identity    users, roles, API tokens                               done
-policy      who may reach which target as which principal
+policy      who may reach which target as which principal          done
 approval    JIT request, approve, time-boxed grant
 session     the live session record and the kill switch
 audit       the append-only event trail and the recording index
@@ -224,6 +224,30 @@ idm = identity.New(st, log, guard)
 
 The closure captures the variable, not its value, and by the time a request arrives `idm` is set.
 The cycle stays visible in `app`, which is where wiring decisions belong.
+
+## When two modules need to talk
+
+`policy` needs to know which principals a target accepts, so a rule cannot grant an account the
+target would refuse. It must not import `target` — modules are independent — and it must not
+foreign-key the `targets` table, which would couple two schemas and make one module's migrations
+depend on another's having run first.
+
+The consumer declares the interface it needs:
+
+```go
+type Targets interface {
+	Principals(ctx context.Context, targetID string) ([]string, error)
+}
+```
+
+`policy.New` takes it, `target.Module` satisfies it structurally, and `app` passes one to the other.
+`policy` never learns that a package called `target` exists, and the architecture test that forbids
+module-to-module imports keeps passing without an exception.
+
+A policy therefore stores `target_id` as an opaque string with no foreign key. If a target is
+deleted, its policies survive as rows that can never match again, because target ids are 80 bits of
+`crypto/rand` and are never reused. Sequential ids would make that stale row a live grant the day
+the counter came round; random ids make it permanently inert.
 
 ## Bootstrap and optional module capabilities
 

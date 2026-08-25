@@ -1,6 +1,7 @@
 package target
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
@@ -30,6 +31,14 @@ func New(st *store.Store, log *slog.Logger, guard Guard) *Module {
 
 func (m *Module) Name() string {
 	return "target"
+}
+
+func (m *Module) Principals(ctx context.Context, targetID string) ([]string, error) {
+	t, err := m.service.get(ctx, targetID)
+	if err != nil {
+		return nil, err
+	}
+	return t.Principals, nil
 }
 
 func (m *Module) Migrations() []store.Migration {

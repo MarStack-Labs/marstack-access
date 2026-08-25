@@ -160,6 +160,41 @@ target unreachable *through the platform*, which fails safe, so it needs no high
 registration. Creating users and issuing tokens is `admin`, because an operator who could do it
 could mint itself an admin.
 
+## Access policy
+
+Authorization on the API answers "may this caller use this endpoint". Policy answers a different
+question: "may this caller reach *that host* as *that account*". A role never implies the second.
+
+A policy binds one subject — a user id or a role — to one target, with an explicit set of principals.
+Evaluation is a single indexed lookup and returns the id of the rule that allowed it, so a decision
+can always be traced to the line that made it.
+
+**Roles are matched exactly here, not by rank.** This is the opposite of the API authorization rule
+in the section above, and the difference is deliberate. `Require(operator)` is a privilege level, so
+an admin satisfying it is correct. A policy is an *assignment*, and rank inheritance would mean every
+admin silently holds every grant any lesser role was ever given. The platform administrator is not
+automatically root on every host in the estate, and the blast radius of a stolen admin token stays
+bounded by the policies written for admins specifically.
+
+There is a test named `TestARoleIsMatchedExactlyAndNotByRank`, because this is exactly the kind of
+rule a future reader would "fix" as an inconsistency.
+
+**Deny by default, and say why.** No matching rule is a denial, and the denial carries a reason. An
+undiagnosable denial gets worked around by granting too much.
+
+**A policy cannot name a principal the target refuses.** Policy consults the live target inventory
+through an interface at create time rather than keeping its own copy. A rule granting `root` on a
+host that only accepts `deploy` would otherwise sit in the inventory looking like access somebody
+has, and be discovered only when a session failed.
+
+**A stale policy is inert, not dormant.** Deleting a target leaves its policies behind with no
+foreign key to clean them up. They can never match again, because target ids are 80 bits of
+`crypto/rand` and are never reused. With sequential ids the same row would become a live grant the
+day the counter came round.
+
+**Writing policy is admin-only.** An operator who could write policy could grant itself any
+principal on any target, which makes the operator role equal to admin.
+
 ## Bootstrap
 
 On a store with no users, the first start creates an `admin` user, issues it a token, and writes the

@@ -146,6 +146,11 @@ func TestEveryRouteExceptHealthzRequiresTheToken(t *testing.T) {
 		{http.MethodPost, "/v1/targets"},
 		{http.MethodGet, "/v1/targets/tgt-abc"},
 		{http.MethodDelete, "/v1/targets/tgt-abc"},
+		{http.MethodGet, "/v1/policies"},
+		{http.MethodPost, "/v1/policies"},
+		{http.MethodGet, "/v1/policies/pol-abc"},
+		{http.MethodDelete, "/v1/policies/pol-abc"},
+		{http.MethodPost, "/v1/policies/evaluate"},
 	}
 
 	for _, route := range protected {
@@ -601,5 +606,73 @@ func TestRunShutsDownOnContextCancel(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("Run did not return after the context was cancelled")
+	}
+}
+
+func TestPolicyGatesAccessEndToEnd(t *testing.T) {
+	a, admin := newTestAppWithAdmin(t)
+
+	created := send(t, a, http.MethodPost, "/v1/targets", admin,
+		`{"name":"db-1","address":"10.0.0.4","principals":["deploy","postgres"]}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("register target: %d (%s)", created.Code, created.Body)
+	}
+	targetID := decodeBody(t, created)["id"].(string)
+
+	user := send(t, a, http.MethodPost, "/v1/users", admin, `{"name":"deployer","role":"operator"}`)
+	userID := decodeBody(t, user)["id"].(string)
+
+	denied := send(t, a, http.MethodPost, "/v1/policies/evaluate", admin,
+		`{"user_id":"`+userID+`","role":"operator","target_id":"`+targetID+`","principal":"deploy"}`)
+	if allowed, _ := decodeBody(t, denied)["allowed"].(bool); allowed {
+		t.Fatal("access was allowed before any policy existed")
+	}
+
+	policy := send(t, a, http.MethodPost, "/v1/policies", admin,
+		`{"name":"db-deploy","subject_kind":"user","subject_id":"`+userID+
+			`","target_id":"`+targetID+`","principals":["deploy"]}`)
+	if policy.Code != http.StatusCreated {
+		t.Fatalf("create policy: %d (%s)", policy.Code, policy.Body)
+	}
+
+	allowed := send(t, a, http.MethodPost, "/v1/policies/evaluate", admin,
+		`{"user_id":"`+userID+`","role":"operator","target_id":"`+targetID+`","principal":"deploy"}`)
+	if ok, _ := decodeBody(t, allowed)["allowed"].(bool); !ok {
+		t.Fatalf("access is still denied after the policy was created: %s", allowed.Body)
+	}
+
+	other := send(t, a, http.MethodPost, "/v1/policies/evaluate", admin,
+		`{"user_id":"`+userID+`","role":"operator","target_id":"`+targetID+`","principal":"postgres"}`)
+	if ok, _ := decodeBody(t, other)["allowed"].(bool); ok {
+		t.Fatal("a policy granting deploy also granted postgres")
+	}
+}
+
+func TestAPolicyCannotNameAPrincipalTheTargetRefuses(t *testing.T) {
+	a, admin := newTestAppWithAdmin(t)
+
+	created := send(t, a, http.MethodPost, "/v1/targets", admin,
+		`{"name":"db-1","address":"10.0.0.4","principals":["deploy"]}`)
+	targetID := decodeBody(t, created)["id"].(string)
+
+	rec := send(t, a, http.MethodPost, "/v1/policies", admin,
+		`{"name":"db-root","subject_kind":"role","subject_id":"operator","target_id":"`+
+			targetID+`","principals":["root"]}`)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: policy must consult the real target inventory, not a copy of it",
+			rec.Code)
+	}
+}
+
+func TestAnOperatorCannotWritePolicy(t *testing.T) {
+	a, admin := newTestAppWithAdmin(t)
+	operator := tokenForRole(t, a, admin, "deployer", authz.RoleOperator)
+
+	rec := send(t, a, http.MethodPost, "/v1/policies", operator,
+		`{"name":"self-grant","subject_kind":"role","subject_id":"operator","target_id":"tgt-abc","principals":["root"]}`)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: an operator who can write policy can grant itself anything", rec.Code)
 	}
 }

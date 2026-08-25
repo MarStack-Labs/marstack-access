@@ -588,3 +588,147 @@ func TestTokenRevokeConfirms(t *testing.T) {
 		t.Fatalf("output = %q, want a revocation confirmation", out)
 	}
 }
+
+func TestPolicyCreateWithAUserSubject(t *testing.T) {
+	var received map[string]any
+
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/policies" {
+			t.Errorf("request = %s %s, want POST /v1/policies", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		writeJSON(t, w, http.StatusCreated, policyView{
+			ID: "pol-abc", Name: "db-deploy", SubjectKind: "user", SubjectID: "usr-abc",
+			TargetID: "tgt-abc", Principals: []string{"deploy"}, CreatedAt: "2026-08-25T10:00:00Z",
+		})
+	})
+
+	out, err := runAgainst(t, endpoint, "policy", "create",
+		"--name", "db-deploy", "--user", "usr-abc", "--target", "tgt-abc", "--principal", "deploy")
+	if err != nil {
+		t.Fatalf("unexpected error: %v (%s)", err, out)
+	}
+
+	if received["subject_kind"] != "user" || received["subject_id"] != "usr-abc" {
+		t.Fatalf("received = %v, want a user subject", received)
+	}
+	if !strings.Contains(out, "user:usr-abc") {
+		t.Errorf("output does not show the subject: %s", out)
+	}
+}
+
+func TestPolicyCreateWithARoleSubject(t *testing.T) {
+	var received map[string]any
+
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		writeJSON(t, w, http.StatusCreated, policyView{ID: "pol-abc", SubjectKind: "role", SubjectID: "operator"})
+	})
+
+	if _, err := runAgainst(t, endpoint, "policy", "create",
+		"--name", "ops-db", "--role", "operator", "--target", "tgt-abc", "--principal", "deploy"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if received["subject_kind"] != "role" || received["subject_id"] != "operator" {
+		t.Fatalf("received = %v, want a role subject", received)
+	}
+}
+
+func TestPolicyCreateRefusesBothSubjectsAndNeither(t *testing.T) {
+	cases := map[string][]string{
+		"both":    {"--name", "p", "--user", "usr-abc", "--role", "operator", "--target", "tgt-abc", "--principal", "deploy"},
+		"neither": {"--name", "p", "--target", "tgt-abc", "--principal", "deploy"},
+	}
+
+	for label, args := range cases {
+		endpoint := fakeControlPlane(t, func(http.ResponseWriter, *http.Request) {
+			t.Errorf("%s: the control plane must not be called", label)
+		})
+		if _, err := runAgainst(t, endpoint, append([]string{"policy", "create"}, args...)...); err == nil {
+			t.Errorf("%s: expected an error", label)
+		}
+	}
+}
+
+func TestPolicyEvaluatePrintsTheDecisionAndTheReason(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if want := "/v1/policies/evaluate"; r.URL.Path != want {
+			t.Errorf("path = %q, want %q", r.URL.Path, want)
+		}
+		writeJSON(t, w, http.StatusOK, decisionView{
+			Allowed: false, Reason: "no policy grants this user the requested principal on this target",
+		})
+	})
+
+	out, err := runAgainst(t, endpoint, "policy", "evaluate",
+		"--user", "usr-abc", "--target", "tgt-abc", "--principal", "deploy")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "allowed: false") {
+		t.Errorf("output does not state the verdict: %s", out)
+	}
+	if !strings.Contains(out, "no policy grants") {
+		t.Errorf("output does not state the reason, so a denial is undiagnosable: %s", out)
+	}
+}
+
+func TestPolicyEvaluateOmitsAnUnsetRole(t *testing.T) {
+	var received map[string]any
+
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		writeJSON(t, w, http.StatusOK, decisionView{Allowed: true, PolicyID: "pol-abc", Reason: "granted"})
+	})
+
+	if _, err := runAgainst(t, endpoint, "policy", "evaluate",
+		"--user", "usr-abc", "--target", "tgt-abc", "--principal", "deploy"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, present := received["role"]; present {
+		t.Error("an empty role was sent, which the server would reject as an unknown role")
+	}
+}
+
+func TestPolicyListRendersATable(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, policyListView{Policies: []policyView{
+			{ID: "pol-abc", Name: "db-deploy", SubjectKind: "role", SubjectID: "operator",
+				TargetID: "tgt-abc", Principals: []string{"deploy", "postgres"}},
+		}})
+	})
+
+	out, err := runAgainst(t, endpoint, "policy", "list")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{"SUBJECT", "PRINCIPALS", "role:operator", "deploy,postgres", "tgt-abc"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestPolicyDeleteConfirms(t *testing.T) {
+	endpoint := fakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/policies/pol-abc" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	out, err := runAgainst(t, endpoint, "policy", "delete", "pol-abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "deleted pol-abc") {
+		t.Fatalf("output = %q, want a deletion confirmation", out)
+	}
+}

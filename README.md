@@ -77,7 +77,7 @@ Every route except `GET /healthz` needs a token. Roles are ranked, and a check m
 | `GET /healthz` | nothing — a load balancer probe carries no credential |
 | `GET /v1/version` | `viewer` |
 | `marac target …` | `operator` |
-| `marac user …`, `marac token …` | `admin` |
+| `marac user …`, `marac token …`, `marac policy …` | `admin` |
 
 Create a working account rather than using the bootstrap admin for daily work:
 
@@ -115,6 +115,37 @@ marac target delete tgt-xxxxxxxxxxxxx
 
 `--port` defaults to 22 and is omitted from the request when unset, so the platform owns the
 default rather than the client. There is no update command yet — delete and re-register.
+
+Registering a target does not grant anyone access to it. A policy binds a subject — a user or a role
+— to one target and an explicit set of accounts:
+
+```sh
+marac policy create --name ops-db --role operator \
+  --target tgt-xxxxxxxxxxxxx --principal deploy
+
+marac policy list
+marac policy delete pol-xxxxxxxxxxxxx
+```
+
+A role is matched **exactly**. Granting the `operator` role does not also grant admins — a platform
+administrator is not automatically root on every host. A policy cannot name a principal the target
+refuses, so a rule that could never work is rejected when it is written rather than when a session
+fails.
+
+Ask what a request would decide, without opening a session:
+
+```sh
+marac policy evaluate --user usr-xxxxxxxxxxxxx --role operator \
+  --target tgt-xxxxxxxxxxxxx --principal deploy
+```
+
+```
+allowed: true
+reason:  granted by policy pol-xxxxxxxxxxxxx
+```
+
+A denial always carries a reason, because an undiagnosable denial gets worked around by granting too
+much.
 
 The client talks to `$MARAC_ENDPOINT`, or `--endpoint`, or loopback. `--output json` prints the raw
 API response for scripting:

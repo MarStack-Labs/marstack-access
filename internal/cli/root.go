@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -48,6 +49,7 @@ func newRootCmd() *cobra.Command {
 		newTargetCmd(g),
 		newUserCmd(g),
 		newTokenCmd(g),
+		newPolicyCmd(g),
 	)
 	return root
 }
@@ -55,6 +57,11 @@ func newRootCmd() *cobra.Command {
 func Execute() error {
 	return newRootCmd().Execute()
 }
+
+var (
+	errNoSubject    = errors.New("one of --user or --role is required")
+	errBothSubjects = errors.New("--user and --role are mutually exclusive: a policy has one subject")
+)
 
 func must(err error) {
 	if err != nil {
