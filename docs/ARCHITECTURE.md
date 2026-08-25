@@ -163,7 +163,7 @@ Modules are added one at a time, each with its own migrations and routes:
 
 ```
 system      health, version                                        done
-target      the SSH target inventory
+target      the SSH target inventory                               done
 identity    users, roles, console sessions
 policy      who may reach which target as which principal
 approval    JIT request, approve, time-boxed grant

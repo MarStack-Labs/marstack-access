@@ -66,6 +66,22 @@ curl -s localhost:7443/healthz
 curl -s localhost:7443/v1/version
 ```
 
+Register a target. A target declares the accounts it will accept — `principals` mirrors what its
+`sshd` is configured to allow, and at least one is required, because a target nobody can land on is
+not reachable.
+
+```sh
+curl -s localhost:7443/v1/targets \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"db-1","address":"10.0.0.4","principals":["deploy","postgres"]}'
+
+curl -s localhost:7443/v1/targets
+curl -s localhost:7443/v1/targets/tgt-xxxxxxxxxxxxx
+curl -s -X DELETE localhost:7443/v1/targets/tgt-xxxxxxxxxxxxx
+```
+
+`port` defaults to 22. There is no update endpoint yet — delete and re-register.
+
 ## Development
 
 ```sh

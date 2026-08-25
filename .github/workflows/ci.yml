@@ -56,9 +56,9 @@ jobs:
           gosec -severity medium -confidence medium ./...
 
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@latest
+          gitleaks detect --redact --no-banner --exit-code 1
 
   codeql:
     if: github.event.repository.visibility == 'public'

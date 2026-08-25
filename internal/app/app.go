@@ -9,6 +9,7 @@ import (
 
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
 	"github.com/marstack-labs/marstack-access/internal/platform/system"
+	"github.com/marstack-labs/marstack-access/internal/platform/target"
 	"github.com/marstack-labs/marstack-access/internal/store"
 )
 
@@ -57,6 +58,7 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 	a := &App{cfg: cfg, log: log, store: st}
 	a.modules = []Module{
 		system.New(st, log),
+		target.New(st, log),
 	}
 
 	if err := a.migrate(ctx); err != nil {

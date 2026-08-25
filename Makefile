@@ -37,9 +37,9 @@ gosec:
 	$(GOBIN)/gosec -quiet -severity medium -confidence medium ./...
 
 secrets:
-	gitleaks detect --redact --no-banner
+	$(GOBIN)/gitleaks detect --redact --no-banner --exit-code 1
 
-security: vuln gosec
+security: vuln gosec secrets
 
 check: vet test staticcheck security
 
@@ -47,6 +47,7 @@ tools:
 	go install honnef.co/go/tools/cmd/staticcheck@latest
 	go install golang.org/x/vuln/cmd/govulncheck@latest
 	go install github.com/securego/gosec/v2/cmd/gosec@latest
+	go install github.com/zricethezav/gitleaks/v8@latest
 
 hooks:
 	git config core.hooksPath .githooks

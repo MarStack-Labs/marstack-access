@@ -181,6 +181,11 @@ one place — the `go` directive in `go.mod` — because `actions/setup-go` sets
 therefore ignores a `toolchain` directive. Pinning the toolchain separately produces a build that
 passes locally and fails in CI with an identical checkout.
 
+**gitleaks runs as a binary, not as an action.** `gitleaks/gitleaks-action@v2` requires a paid
+licence for repositories owned by an organisation and fails the job without one. The scanner itself
+is open source and written in Go, so CI installs it the same way it installs the other three and
+runs the CLI directly. `make tools` installs the same binary locally.
+
 **CodeQL only runs on a public repository.** Uploading results requires code scanning, which a
 private repository gets only with GitHub Advanced Security. The job is gated on visibility rather
 than deleted, so it starts working the day the repository opens up. A job that can never pass would

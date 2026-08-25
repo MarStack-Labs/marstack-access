@@ -82,8 +82,30 @@ func TestVersionEndpointReportsBuildMetadata(t *testing.T) {
 }
 
 func TestUnknownRouteIsNotFound(t *testing.T) {
-	if rec := do(t, newTestApp(t), http.MethodGet, "/v1/targets"); rec.Code != http.StatusNotFound {
+	if rec := do(t, newTestApp(t), http.MethodGet, "/v1/no-such-resource"); rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestTargetModuleIsWiredThroughTheFullPipeline(t *testing.T) {
+	a := newTestApp(t)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/targets",
+		strings.NewReader(`{"name":"db-1","address":"10.0.0.4","principals":["deploy"]}`))
+	r.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: the module's migrations and routes must both be registered (%s)",
+			rec.Code, rec.Body)
+	}
+	if rec.Header().Get("X-Request-Id") == "" {
+		t.Error("a module route did not go through the RequestID middleware")
+	}
+	if rec.Header().Get("X-Frame-Options") != "DENY" {
+		t.Error("a module route did not go through the SecureHeaders middleware")
 	}
 }
 
