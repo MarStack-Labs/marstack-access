@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
 	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
+	"github.com/marstack-labs/marstack-access/internal/kernel/objstore"
 	"github.com/marstack-labs/marstack-access/internal/platform/approval"
 	"github.com/marstack-labs/marstack-access/internal/platform/identity"
 	"github.com/marstack-labs/marstack-access/internal/platform/policy"
@@ -41,9 +43,10 @@ type Reconciler interface {
 }
 
 const (
-	bootstrapTokenFile = "bootstrap-token"
-	auditDir           = "audit"
-	auditJob           = "marstack-access"
+	bootstrapTokenFile   = "bootstrap-token"
+	auditDir             = "audit"
+	auditJob             = "marstack-access"
+	recordingContentType = "application/x-asciicast"
 )
 
 type Config struct {
@@ -53,6 +56,7 @@ type Config struct {
 	AdvertiseIP    string
 	DevCAKeyPath   string
 	LokiURL        string
+	Recordings     objstore.Config
 	RequestTimeout time.Duration
 }
 
@@ -165,7 +169,8 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 				AdvertiseIP: cfg.AdvertiseIP,
 			},
 			log, idm, targetLookup(targets), policies, grants, signer,
-			sessionOpener(sessions), sessionCloser(sessions), a.trail)
+			sessionOpener(sessions), sessionCloser(sessions), a.trail,
+			recordingStore(cfg, log))
 		if err != nil {
 			st.Close()
 			return nil, err
@@ -209,6 +214,35 @@ func sessionCloser(sessions *session.Module) sshd.SessionCloser {
 			Reason:        s.Reason,
 			RecordedBytes: s.RecordedBytes,
 		})
+	}
+}
+
+func recordingStore(cfg Config, log *slog.Logger) sshd.RecordingStore {
+	client, err := objstore.New(cfg.Recordings)
+	switch {
+	case errors.Is(err, objstore.ErrNotConfigured):
+		log.Warn("no object store configured, recordings stay on this host",
+			"hint", "--recording-endpoint and --recording-bucket move them somewhere the gateway cannot delete")
+		return nil
+	case err != nil:
+		log.Error("object store configuration is unusable, recordings stay on this host",
+			"error", err.Error())
+		return nil
+	}
+
+	if client.Insecure() {
+		log.Warn("the object store endpoint is plain http, so uploads and their credentials cross the network in the clear",
+			"bucket", client.Bucket())
+	}
+
+	log.Info("recordings will be stored", "bucket", client.Bucket())
+
+	return func(ctx context.Context, key string, body io.Reader) (string, error) {
+		stored, err := client.Put(ctx, key, body, recordingContentType)
+		if err != nil {
+			return "", err
+		}
+		return stored.Bucket + "/" + stored.Key, nil
 	}
 }
 

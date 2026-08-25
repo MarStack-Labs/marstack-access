@@ -23,10 +23,10 @@ This one inverts that.
   configuration, and `sshd` — not our code — enforces the certificate's principal, expiry, and
   source address.
 - **An audit trail that can only grow.** Every event is written to a local append-only file and
-  shipped to Loki. Nothing in the code can delete, truncate, or rotate a trail — an architecture test
-  fails the build if a sink grows such a method. Recordings are not yet in object storage, so that
-  half of the claim is honest work in progress; [`docs/SECURITY.md`](docs/SECURITY.md) says exactly
-  what is and is not covered.
+  shipped to Loki, and every recording is uploaded to MinIO under an object lock in compliance mode.
+  Nothing in the code can delete, truncate, or rotate any of it — architecture tests fail the build if
+  a sink or the object client grows such a method. [`docs/SECURITY.md`](docs/SECURITY.md) says which
+  parts depend on the store being configured correctly, and what has not been demonstrated yet.
 - **Greppable sessions.** Recordings are asciicast, not video. "Who ran this command last month" is
   a query, not an afternoon of playback.
 
@@ -293,6 +293,21 @@ Loki is down the event is already on disk and the drop is counted.
 A kill that closed nothing says so rather than reporting success — the row may have been opened by a
 run that has since stopped. Rows left open by a crash are closed on the next start with a reason
 naming the restart, so the list of live sessions does not fill with sessions that are not running.
+
+Recordings upload to MinIO when a session closes, under an object lock:
+
+```sh
+export MARAC_S3_ACCESS_KEY=... MARAC_S3_SECRET_KEY=...
+marac server --ssh-listen 127.0.0.1:2222 --dev-ca-key ./data/ca \
+  --recording-endpoint https://minio.internal:9000 \
+  --recording-bucket marac-recordings \
+  --recording-retain-for 2160h
+```
+
+The bucket has to be created with object lock enabled — `mc mb --with-lock` — because it cannot be
+turned on afterwards. Credentials come from the environment rather than flags, since a secret on the
+command line is visible in `ps`. The local copy is kept: uploading never deletes, so pruning old
+recordings is a job for outside this process, done after confirming the object exists.
 
 > `--dev-ca-key` holds the signing key in a local file. Without it the front door still authorises
 > but cannot connect, and it says so. See [`docs/SECURITY.md`](docs/SECURITY.md) for what the

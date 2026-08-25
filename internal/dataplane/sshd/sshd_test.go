@@ -45,6 +45,9 @@ type stubs struct {
 	opened    []SessionOpened
 	closed    map[string]SessionClosed
 	openFails bool
+
+	uploaded    map[string][]byte
+	uploadFails bool
 }
 
 func (s *stubs) Open(_ context.Context, rec SessionOpened) error {
@@ -155,7 +158,7 @@ func startServerWith(t *testing.T, st *stubs, signer certs.Signer, dataDir strin
 	t.Cleanup(func() { trail.Close() })
 
 	srv, err := New(Config{Listen: "127.0.0.1:0", DataDir: dataDir, AdvertiseIP: "127.0.0.1"},
-		logging.New("error", io.Discard), st, st.lookup, st, st, signer, st.Open, st.Close, trail)
+		logging.New("error", io.Discard), st, st.lookup, st, st, signer, st.Open, st.Close, trail, st.upload)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
@@ -402,13 +405,13 @@ func TestTheHostKeyIsStableAcrossRestarts(t *testing.T) {
 	st := newStubs()
 
 	first, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close, nil)
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close, nil, nil)
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
 
 	second, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close, nil)
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close, nil, nil)
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -423,7 +426,7 @@ func TestTheHostKeyIsNotWorldReadable(t *testing.T) {
 	st := newStubs()
 
 	if _, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close, nil); err != nil {
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close, nil, nil); err != nil {
 		t.Fatalf("new: %v", err)
 	}
 
@@ -445,7 +448,7 @@ func TestACorruptHostKeyFailsRatherThanBeingReplaced(t *testing.T) {
 	}
 
 	if _, err := New(Config{Listen: "127.0.0.1:0", DataDir: dir},
-		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close, nil); err == nil {
+		logging.New("error", io.Discard), st, st.lookup, st, st, nil, st.Open, st.Close, nil, nil); err == nil {
 		t.Fatal("a corrupt host key was silently replaced. Generating a new one would make every client's stored key wrong at once, which is indistinguishable from an attack")
 	}
 }
@@ -1075,4 +1078,175 @@ func TestALiveSessionIsDeregisteredWhenItEndsNormally(t *testing.T) {
 	waitFor(t, "the registry to empty", func() bool {
 		return srv.LiveSessions() == 0
 	})
+}
+
+func (s *stubs) upload(_ context.Context, key string, body io.Reader) (string, error) {
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		return "", err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.uploadFails {
+		return "", fault.Unavailable("store_down", "the object store is unreachable")
+	}
+	if s.uploaded == nil {
+		s.uploaded = map[string][]byte{}
+	}
+	s.uploaded[key] = raw
+	return "recordings/" + key, nil
+}
+
+func (s *stubs) objects() map[string][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	snapshot := map[string][]byte{}
+	for k, v := range s.uploaded {
+		snapshot[k] = v
+	}
+	return snapshot
+}
+
+func TestARecordingIsUploadedWhenTheSessionCloses(t *testing.T) {
+	ca := newTestCA(t)
+	target := startFakeTarget(t, ca)
+	st, clientKey := registeredAlice(t)
+	st.targets["db-1"] = fakeTargetEntry(t, target)
+	srv, addr := startServerWith(t, st, ca, t.TempDir())
+
+	if res := dial(t, srv, addr, "deploy:db-1", clientKey); res.err != nil {
+		t.Fatalf("session failed: %v (%s)", res.err, res.stderr)
+	}
+
+	objects := st.objects()
+	if len(objects) != 1 {
+		t.Fatalf("%d objects uploaded, want 1", len(objects))
+	}
+
+	for key, body := range objects {
+		if !strings.HasSuffix(key, ".cast") {
+			t.Errorf("key = %q, want a .cast suffix", key)
+		}
+		if !strings.Contains(key, "/") {
+			t.Errorf("key = %q, want a date prefix so a bucket stays browsable", key)
+		}
+		if !strings.Contains(string(body), "welcome to db-1") {
+			t.Errorf("the uploaded object is not the recording: %s", body)
+		}
+		if !strings.Contains(string(body), `"version":2`) {
+			t.Error("the uploaded object has no asciicast header, so the recorder was still open when it was read")
+		}
+	}
+}
+
+func TestTheLocalRecordingSurvivesTheUpload(t *testing.T) {
+	ca := newTestCA(t)
+	target := startFakeTarget(t, ca)
+	st, clientKey := registeredAlice(t)
+	st.targets["db-1"] = fakeTargetEntry(t, target)
+	dataDir := t.TempDir()
+	srv, addr := startServerWith(t, st, ca, dataDir)
+
+	if res := dial(t, srv, addr, "deploy:db-1", clientKey); res.err != nil {
+		t.Fatalf("session failed: %v", res.err)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(dataDir, recordingDir))
+	if err != nil {
+		t.Fatalf("read recordings: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("%d local recordings, want 1: uploading must not remove the local copy, because removing a recording is the one thing this platform never does",
+			len(entries))
+	}
+}
+
+func TestAFailedUploadLeavesTheSessionAloneAndSaysSo(t *testing.T) {
+	ca := newTestCA(t)
+	target := startFakeTarget(t, ca)
+	st, clientKey := registeredAlice(t)
+	st.targets["db-1"] = fakeTargetEntry(t, target)
+	st.uploadFails = true
+	dataDir := t.TempDir()
+	srv, addr := startServerWith(t, st, ca, dataDir)
+
+	res := dial(t, srv, addr, "deploy:db-1", clientKey)
+	if res.err != nil {
+		t.Fatalf("the session failed because the upload failed: %v. The session already happened; refusing it afterwards is not available", res.err)
+	}
+	if !strings.Contains(res.stdout, "welcome to db-1") {
+		t.Errorf("the user did not get their session: %q", res.stdout)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(dataDir, recordingDir))
+	if err != nil {
+		t.Fatalf("read recordings: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatal("the local recording is gone after a failed upload, so the only copy was lost")
+	}
+
+	events := readAuditTrail(t, srv.auditPath)
+	if _, ok := findAuditEvent(events, "recording.not_stored"); !ok {
+		t.Fatal("a failed upload left no audit event, so a recording that exists in one place only is undetectable")
+	}
+}
+
+func TestASuccessfulUploadIsRecordedInTheTrail(t *testing.T) {
+	ca := newTestCA(t)
+	target := startFakeTarget(t, ca)
+	st, clientKey := registeredAlice(t)
+	st.targets["db-1"] = fakeTargetEntry(t, target)
+	srv, addr := startServerWith(t, st, ca, t.TempDir())
+
+	if res := dial(t, srv, addr, "deploy:db-1", clientKey); res.err != nil {
+		t.Fatalf("session failed: %v", res.err)
+	}
+
+	events := readAuditTrail(t, srv.auditPath)
+	event, ok := findAuditEvent(events, "recording.stored")
+	if !ok {
+		t.Fatal("a stored recording left no audit event, so nothing names where it went")
+	}
+	if event["fields"] == nil {
+		t.Fatal("the event carries no fields")
+	}
+	fields, _ := event["fields"].(map[string]any)
+	if fields["object"] == nil || fields["local"] == nil {
+		t.Fatalf("the event does not name both copies: %v", fields)
+	}
+}
+
+func readAuditTrail(t *testing.T, path string) []map[string]any {
+	t.Helper()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read trail: %v", err)
+	}
+
+	events := []map[string]any{}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
+			continue
+		}
+		var e map[string]any
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("trail line is not JSON: %v (%s)", err, line)
+		}
+		events = append(events, e)
+	}
+	return events
+}
+
+func findAuditEvent(events []map[string]any, action string) (map[string]any, bool) {
+	for _, e := range events {
+		if e["action"] == action {
+			return e, true
+		}
+	}
+	return nil, false
 }

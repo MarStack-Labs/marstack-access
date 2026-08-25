@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"time"
@@ -69,6 +70,8 @@ type SessionOpener func(ctx context.Context, s SessionOpened) error
 
 type SessionCloser func(ctx context.Context, id string, s SessionClosed) error
 
+type RecordingStore func(ctx context.Context, key string, body io.Reader) (string, error)
+
 type Config struct {
 	Listen      string
 	DataDir     string
@@ -87,6 +90,7 @@ type Server struct {
 	closeSession SessionCloser
 	live         *registry
 	trail        *audit.Recorder
+	recordings   RecordingStore
 	auditPath    string
 	now          func() time.Time
 	sshConfig    *ssh.ServerConfig
@@ -95,7 +99,8 @@ type Server struct {
 
 func New(cfg Config, log *slog.Logger, identities Identities, targets TargetLookup,
 	policies Policies, grants Grants, signer certs.Signer,
-	opener SessionOpener, closer SessionCloser, trail *audit.Recorder) (*Server, error) {
+	opener SessionOpener, closer SessionCloser, trail *audit.Recorder,
+	recordings RecordingStore) (*Server, error) {
 	hostKey, err := loadOrCreateHostKey(cfg.DataDir)
 	if err != nil {
 		return nil, err
@@ -113,6 +118,7 @@ func New(cfg Config, log *slog.Logger, identities Identities, targets TargetLook
 		closeSession: closer,
 		live:         newRegistry(),
 		trail:        trail,
+		recordings:   recordings,
 		now:          time.Now,
 		hostKey:      hostKey.PublicKey(),
 	}

@@ -501,6 +501,58 @@ non-secret handle the design exists to provide. The trail is written to disk and
 a secret in it is a secret in two more places. There is a test asserting the issued secret does not
 appear in the event.
 
+### Recordings in object storage
+
+A recording is uploaded to MinIO when its session closes, under `<YYYY>/<MM>/<DD>/<session>.cast`,
+with `x-amz-object-lock-mode: COMPLIANCE` and a retention date. Compliance mode is chosen over
+governance deliberately: governance can be bypassed by a sufficiently privileged user, and that user
+is the adversary this invariant exists for.
+
+**The client can only put.** There is no delete, no remove, and no lifecycle call in
+`kernel/objstore`, and a test asserts the type does not satisfy an interface with one. Object lock
+stops a store administrator; having no method stops the gateway itself.
+
+**Object lock headers are covered by the signature.** They are `x-amz-*` headers, so they are in
+`SignedHeaders` and cannot be stripped in flight — which is precisely what someone who wanted a
+deletable recording would try. There is a test walking every `x-amz-` header sent and asserting it
+was signed.
+
+**The local copy is never removed.** Uploading does not delete anything, so recordings accumulate on
+the gateway. That is an operator's retention job, done from outside this process after confirming the
+object exists. A `--purge-old-recordings` flag would be the one delete this design does not have.
+
+**A failed upload does not fail the session.** The session already happened; refusing it afterwards
+is not available. The failure is logged, `recording.not_stored` goes in the trail, and the local copy
+stays. The event is what makes a one-copy recording detectable.
+
+**The payload is hashed in memory, with a cap.** SigV4 needs the content hash before the request is
+sent. The cap is 64 MiB by default and an object over it is refused rather than read, because an
+unbounded read here is the gateway's memory in the hands of whoever can talk for long enough.
+
+**Credentials come from the environment, never a flag.** `MARAC_S3_ACCESS_KEY` and
+`MARAC_S3_SECRET_KEY`. A secret on the command line is visible in `ps` to every user on the host.
+
+### The MinIO side, which this repository cannot enforce
+
+Two things have to be true on the store, and neither is something the gateway can check:
+
+```
+mc mb --with-lock myminio/marac-recordings
+mc admin policy create myminio marac-put put-only.json
+```
+
+The bucket must be created **with object lock enabled** — it cannot be turned on afterwards. And the
+gateway's credential should carry `s3:PutObject` and nothing else:
+
+```json
+{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+ "Action":["s3:PutObject","s3:PutObjectRetention"],
+ "Resource":["arn:aws:s3:::marac-recordings/*"]}]}
+```
+
+A credential that can delete makes the code's inability to delete beside the point. See
+[`adr/0001-write-sigv4-rather-than-add-an-sdk.md`](adr/0001-write-sigv4-rather-than-add-an-sdk.md).
+
 ### What is not covered yet
 
 **Control plane events are written after the change is committed.** A crash between the database
@@ -510,10 +562,12 @@ the trail in the database — which is the thing an attacker who owns the host c
 path does not have this problem: its row and its recording are both opened before the target is
 touched, so the ordering there refuses rather than loses.
 
-Recordings are still local files. Invariant 8 says recordings go to object storage under an object
-lock, and that half is not built: `./data/recordings` is deletable by root on the gateway. The event
-trail names every recording, so a missing file is detectable from Loki — but detecting is not the
-same as preventing, and this section will say so until the upload exists.
+**The signing has not been demonstrated against a real MinIO.** SigV4 is written here rather than
+taken from an SDK, and the tests pin its structure, prove every sent header is signed, and prove that
+changing any input changes the signature. What they cannot prove is agreement with MinIO's own
+verifier — a canonicalisation mistake would show up as a 403 from the store, not as a failing test.
+Running a MinIO was not possible in the environment this was written in. Until someone has watched an
+object land in a bucket, treat the upload as untested at the boundary that matters.
 
 ## Bootstrap
 

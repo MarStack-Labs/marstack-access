@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -142,7 +144,12 @@ func (s *Server) proxy(ctx context.Context, sessionID, remote string, id authz.I
 			"this session cannot be recorded, so it will not be opened"))
 		return
 	}
-	defer rec.Close()
+	recorderClosed := false
+	defer func() {
+		if !recorderClosed {
+			_ = rec.Close()
+		}
+	}()
 
 	if err := s.openSession(ctx, SessionOpened{
 		ID:           sessionID,
@@ -218,7 +225,14 @@ func (s *Server) proxy(ctx context.Context, sessionID, remote string, id authz.I
 		"principal", res.destination.principal, "exit", code,
 		"reason", reason, "recorded_bytes", rec.Recorded())
 
+	if err := rec.Close(); err != nil {
+		s.log.Error("ssh recording could not be closed",
+			"session", sessionID, "error", err.Error())
+	}
+	recorderClosed = true
+
 	s.finish(ctx, sessionID, code, reason, rec)
+	s.store(ctx, sessionID, rec)
 	s.audit(ctx, audit.Event{
 		Action:    "session.closed",
 		ActorID:   id.UserID,
@@ -406,4 +420,50 @@ func sendExitStatus(channel ssh.Channel, code uint32) {
 	payload := make([]byte, 4)
 	binary.BigEndian.PutUint32(payload, code)
 	_, _ = channel.SendRequest("exit-status", false, payload)
+}
+
+func (s *Server) store(ctx context.Context, sessionID string, rec *recorder) {
+	if s.recordings == nil {
+		return
+	}
+
+	file, err := os.Open(filepath.Clean(rec.Path()))
+	if err != nil {
+		s.uploadFailed(ctx, sessionID, rec, err)
+		return
+	}
+	defer file.Close()
+
+	at := s.now().UTC()
+	key := fmt.Sprintf("%04d/%02d/%02d/%s.cast", at.Year(), at.Month(), at.Day(), sessionID)
+
+	location, err := s.recordings(ctx, key, file)
+	if err != nil {
+		s.uploadFailed(ctx, sessionID, rec, err)
+		return
+	}
+
+	s.log.Info("recording stored", "session", sessionID, "object", location)
+	s.audit(ctx, audit.Event{
+		Action: "recording.stored",
+		Object: sessionID,
+		Fields: map[string]string{
+			"object": location,
+			"local":  rec.Path(),
+			"bytes":  strconv.FormatInt(rec.Recorded(), 10),
+		},
+	})
+}
+
+func (s *Server) uploadFailed(ctx context.Context, sessionID string, rec *recorder, cause error) {
+	s.log.Error("recording could not be stored, it remains on this host only",
+		"session", sessionID, "local", rec.Path(), "error", cause.Error())
+
+	s.audit(ctx, audit.Event{
+		Action:  "recording.not_stored",
+		Outcome: audit.OutcomeError,
+		Object:  sessionID,
+		Reason:  cause.Error(),
+		Fields:  map[string]string{"local": rec.Path()},
+	})
 }
