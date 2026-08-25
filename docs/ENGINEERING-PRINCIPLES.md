@@ -109,3 +109,8 @@ make check      # vet + test + security scans
   change the rule deliberately in the same commit — do not work around it with an import alias.
 - **A "temporarily disable recording" flag is not an acceptable debugging aid.** Add a test seam
   instead.
+- **The Go version lives only in the `go` directive of `go.mod`.** Do not add a `toolchain`
+  directive and do not pin a version in the workflow. `actions/setup-go` sets `GOTOOLCHAIN=local`,
+  so a `toolchain` directive is honoured locally and ignored in CI — the result is a green laptop
+  and a red pipeline on an identical checkout. A `govulncheck` failure on a standard library
+  advisory is usually fixed by bumping that one directive.

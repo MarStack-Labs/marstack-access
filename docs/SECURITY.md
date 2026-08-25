@@ -173,6 +173,20 @@ make check          # vet, test, staticcheck, govulncheck, gosec
 `govulncheck` is preferred over a plain dependency audit because it reports only vulnerabilities
 that are actually reachable, which keeps the signal usable.
 
+Two things about this pipeline are worth knowing before changing it.
+
+**The Go patch version is a security control.** `govulncheck` fails the build on a standard library
+advisory that our code can actually reach, and the fix is usually a patch bump. The version lives in
+one place — the `go` directive in `go.mod` — because `actions/setup-go` sets `GOTOOLCHAIN=local` and
+therefore ignores a `toolchain` directive. Pinning the toolchain separately produces a build that
+passes locally and fails in CI with an identical checkout.
+
+**CodeQL only runs on a public repository.** Uploading results requires code scanning, which a
+private repository gets only with GitHub Advanced Security. The job is gated on visibility rather
+than deleted, so it starts working the day the repository opens up. A job that can never pass would
+otherwise leave CI permanently red, which trains everyone to stop reading it — a worse outcome than
+one fewer scanner.
+
 ## Reporting
 
 The project is pre-release and has no users. Once it does, this section gets a contact address and a
