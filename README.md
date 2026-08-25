@@ -66,21 +66,29 @@ curl -s localhost:7443/healthz
 curl -s localhost:7443/v1/version
 ```
 
-Register a target. A target declares the accounts it will accept — `principals` mirrors what its
+Register a target. A target declares the accounts it will accept — `principal` mirrors what its
 `sshd` is configured to allow, and at least one is required, because a target nobody can land on is
 not reachable.
 
 ```sh
-curl -s localhost:7443/v1/targets \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"db-1","address":"10.0.0.4","principals":["deploy","postgres"]}'
+marac target register --name db-1 --address 10.0.0.4 \
+  --principal deploy --principal postgres
 
-curl -s localhost:7443/v1/targets
-curl -s localhost:7443/v1/targets/tgt-xxxxxxxxxxxxx
-curl -s -X DELETE localhost:7443/v1/targets/tgt-xxxxxxxxxxxxx
+marac target list
+marac target get tgt-xxxxxxxxxxxxx
+marac target delete tgt-xxxxxxxxxxxxx
 ```
 
-`port` defaults to 22. There is no update endpoint yet — delete and re-register.
+`--port` defaults to 22 and is omitted from the request when unset, so the platform owns the
+default rather than the client. There is no update command yet — delete and re-register.
+
+The client talks to `$MARAC_ENDPOINT`, or `--endpoint`, or loopback. `--output json` prints the raw
+API response for scripting:
+
+```sh
+export MARAC_ENDPOINT=http://control.internal:7443
+marac target list --output json
+```
 
 ## Development
 

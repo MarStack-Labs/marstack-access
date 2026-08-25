@@ -69,8 +69,28 @@ func TestAddressRejectsAnythingThatIsNotAHost(t *testing.T) {
 }
 
 func TestAddressRejectsUppercaseToKeepOneHostOneRecord(t *testing.T) {
-	if err := Address("address", "DB-1.internal"); err == nil {
+	err := Address("address", "DB-1.internal")
+	if err == nil {
 		t.Fatal("uppercase was accepted, so DB-1 and db-1 could be registered as two targets")
+	}
+	if !strings.Contains(err.Error(), "lowercase") {
+		t.Fatalf("error = %q, want it to name casing as the problem", err)
+	}
+}
+
+func TestAMalformedAddressIsNotBlamedOnCasing(t *testing.T) {
+	for _, value := range []string{
+		"10.0.0.4 -oProxyCommand=id",
+		"db-1;Reboot",
+		"SSH://10.0.0.4",
+	} {
+		err := Address("address", value)
+		if err == nil {
+			t.Fatalf("Address(%q) = nil, want an error", value)
+		}
+		if strings.Contains(err.Error(), "lowercase") {
+			t.Errorf("Address(%q) blamed casing: %q. The real problem is the shape, and a caller told to lowercase it will retry and fail again", value, err)
+		}
 	}
 }
 

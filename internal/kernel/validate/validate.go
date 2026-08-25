@@ -50,12 +50,12 @@ func Address(field, value string) error {
 	if net.ParseIP(value) != nil {
 		return nil
 	}
+	if !hostnamePattern.MatchString(strings.ToLower(value)) {
+		return invalid(field, "%s must be an IP address or a dotted hostname", field)
+	}
 	if strings.ToLower(value) != value {
 		return invalid(field,
 			"%s must be lowercase so one host cannot be registered twice under different casing", field)
-	}
-	if !hostnamePattern.MatchString(value) {
-		return invalid(field, "%s must be an IP address or a dotted hostname", field)
 	}
 	return nil
 }
