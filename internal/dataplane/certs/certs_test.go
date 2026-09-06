@@ -53,7 +53,8 @@ var testNow = time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
 
 func checkerFor(ca *FileSigner, at time.Time) *ssh.CertChecker {
 	return &ssh.CertChecker{
-		Clock: func() time.Time { return at },
+		Clock:                    func() time.Time { return at },
+		SupportedCriticalOptions: []string{sourceAddressOption},
 		IsUserAuthority: func(auth ssh.PublicKey) bool {
 			return ssh.FingerprintSHA256(auth) == ssh.FingerprintSHA256(ca.PublicKey())
 		},

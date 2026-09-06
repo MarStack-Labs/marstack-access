@@ -14,6 +14,8 @@ import (
 
 const MaxTTL = 5 * time.Minute
 
+const sourceAddressOption = "source-address"
+
 type Request struct {
 	PublicKey     ssh.PublicKey
 	KeyID         string
@@ -87,7 +89,7 @@ func build(req Request, serial uint64) *ssh.Certificate {
 		ValidBefore:     unixSeconds(req.ValidBefore),
 		Permissions: ssh.Permissions{
 			CriticalOptions: map[string]string{
-				"source-address": hostPrefix(req.SourceAddress),
+				sourceAddressOption: hostPrefix(req.SourceAddress),
 			},
 			Extensions: map[string]string{
 				"permit-pty": "",
