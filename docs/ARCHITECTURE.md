@@ -44,6 +44,7 @@ cmd/marac               entry point, nothing else
 internal/cli            command surface (cobra), flag parsing, process lifecycle
 internal/app            composition root: owns config, builds modules, wires the router
 internal/platform/*     the control plane modules — one vertical slice each
+internal/console        the web console: embedded files, served, nothing more
 internal/store          SQLite, migration runner, transaction helpers
 internal/kernel/*       cross-cutting primitives with no domain knowledge
 internal/version        build metadata, injected by -ldflags
@@ -60,6 +61,7 @@ Enforced by `internal/architecture/rules_test.go`. Breaking one fails `make test
 | `platform/*` must not import `app` | the composition root depends on modules, never the reverse |
 | `store` must not import `platform/*` or `app` | persistence stays infrastructure |
 | `cmd/*` may only import `internal/cli` | the entry point holds no logic |
+| `console` must import nothing from this module | a page is a client, so it earns its data from the same API everyone else calls |
 
 When two modules genuinely need to talk, the caller declares the interface it needs and `app`
 injects the implementation. No shared package is created before there is a second consumer.
@@ -299,6 +301,27 @@ sockets — is resolved in `app` with a closure, the same way the guard and `ide
 **A row with no live socket reports that, rather than reporting success.** The row may have been
 opened by a run that has since stopped, or on another node once there is more than one. Telling an
 incident responder a session is closed when it is not is the worst possible answer here.
+
+## The console is a client, not a module
+
+`internal/console` holds an `embed.FS` of files and a handler that serves them under `/console/`.
+It has no service, no repository, no migration, and no route of its own beyond the file tree.
+`TestTheConsoleIsAssetsAndNothingElse` fails the build if it imports anything from this module at
+all — not even a kernel package.
+
+That looks like an arbitrary restriction until the alternative is written down. The moment the
+console can call into `platform`, there is a second way to reach the same behaviour: one that
+answers to the guard and one that does not. Every invariant in `docs/SECURITY.md` would then need
+proving twice, and the second proof is the one nobody writes. Keeping the page on the public API
+means the browser is subject to exactly the checks `marac` and `curl` are subject to, and the
+console cannot become the way around a role.
+
+The page pays for that with a real cost: it can only show what the API already returns, and a screen
+that needs a new field needs an API change first. That is the intended direction of pressure.
+
+The assets are three files and no build step — no bundler, no framework, no `node_modules`. A
+security gateway that cannot be rebuilt from a clean checkout with `go build` has acquired a supply
+chain, and this one is small enough not to need it.
 
 ## Bootstrap and optional module capabilities
 

@@ -1,0 +1,248 @@
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--ms-bg);
+  color: var(--ms-fg);
+  font-family: var(--ms-font);
+  font-size: var(--ms-fs-base);
+}
+
+.signin {
+  position: fixed;
+  inset: 0;
+  display: none;
+  place-items: center;
+  background: var(--ms-bg);
+  z-index: 40;
+}
+
+.signin[data-open="1"] {
+  display: grid;
+}
+
+.signin form {
+  width: min(26rem, calc(100vw - 2rem));
+  padding: var(--ms-sp-6);
+  background: var(--ms-bg-raised);
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-r-lg);
+  box-shadow: var(--ms-shadow-lg);
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ms-sp-2);
+}
+
+.brand b {
+  font-size: var(--ms-fs-lg);
+}
+
+.signin p {
+  margin: var(--ms-sp-3) 0 var(--ms-sp-5);
+  color: var(--ms-fg-muted);
+  font-size: var(--ms-fs-sm);
+  line-height: 1.55;
+}
+
+.signin label {
+  display: block;
+  margin-bottom: var(--ms-sp-2);
+  color: var(--ms-fg-muted);
+  font-size: var(--ms-fs-sm);
+}
+
+.signin .ms-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--ms-font-mono);
+}
+
+.signin .ms-btn-primary {
+  width: 100%;
+  margin-top: var(--ms-sp-4);
+  justify-content: center;
+}
+
+.problem {
+  min-height: 1.25rem;
+  margin: var(--ms-sp-3) 0 0;
+  color: var(--ms-danger);
+  font-size: var(--ms-fs-sm);
+}
+
+.shell {
+  display: none;
+  grid-template-columns: var(--ms-sidebar-w) 1fr;
+  min-height: 100vh;
+}
+
+.shell[data-open="1"] {
+  display: grid;
+}
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-sp-1);
+  padding: var(--ms-sp-4);
+  border-right: 1px solid var(--ms-border-subtle);
+  background: var(--ms-bg-sunken);
+}
+
+.rail .brand {
+  margin-bottom: var(--ms-sp-5);
+  padding: 0 var(--ms-sp-2);
+}
+
+.rail nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rail footer {
+  margin-top: auto;
+  padding-top: var(--ms-sp-4);
+  border-top: 1px solid var(--ms-border-subtle);
+  color: var(--ms-fg-muted);
+  font-size: var(--ms-fs-sm);
+}
+
+.rail footer b {
+  display: block;
+  color: var(--ms-fg);
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-sp-3);
+  height: var(--ms-topbar-h);
+  padding: 0 var(--ms-sp-6);
+  border-bottom: 1px solid var(--ms-border-subtle);
+}
+
+.topbar .grow {
+  flex: 1;
+}
+
+.topbar label {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-sp-2);
+  color: var(--ms-fg-muted);
+  font-size: var(--ms-fs-sm);
+}
+
+.view {
+  display: none;
+  padding: var(--ms-sp-6);
+}
+
+.view[data-open="1"] {
+  display: block;
+}
+
+.view header {
+  margin-bottom: var(--ms-sp-5);
+}
+
+.view header h1 {
+  margin: 0 0 var(--ms-sp-2);
+  font-size: var(--ms-fs-xl);
+  letter-spacing: var(--ms-track-tight);
+}
+
+.view header p {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--ms-fg-muted);
+  font-size: var(--ms-fs-sm);
+  line-height: 1.6;
+}
+
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ms-sp-3);
+  margin-bottom: var(--ms-sp-5);
+}
+
+.stats .ms-stat {
+  min-width: 9rem;
+}
+
+.empty {
+  padding: var(--ms-sp-7) var(--ms-sp-4);
+  border: 1px dashed var(--ms-border);
+  border-radius: var(--ms-r-md);
+  color: var(--ms-fg-muted);
+  text-align: center;
+  font-size: var(--ms-fs-sm);
+}
+
+.actions {
+  display: flex;
+  gap: var(--ms-sp-2);
+  justify-content: flex-end;
+}
+
+.reason {
+  display: block;
+  max-width: 34ch;
+  overflow: hidden;
+  color: var(--ms-fg-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toasts {
+  position: fixed;
+  right: var(--ms-sp-5);
+  bottom: var(--ms-sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-sp-2);
+  z-index: 50;
+}
+
+.toast {
+  max-width: 26rem;
+  padding: var(--ms-sp-3) var(--ms-sp-4);
+  border: 1px solid var(--ms-border);
+  border-left-width: 3px;
+  border-radius: var(--ms-r-md);
+  background: var(--ms-bg-overlay);
+  box-shadow: var(--ms-shadow-lg);
+  font-size: var(--ms-fs-sm);
+}
+
+.toast b {
+  display: block;
+  margin-bottom: 2px;
+}
+
+.toast span {
+  color: var(--ms-fg-muted);
+  line-height: 1.5;
+}
+
+.toast[data-kind="ok"] {
+  border-left-color: var(--ms-ok);
+}
+
+.toast[data-kind="bad"] {
+  border-left-color: var(--ms-danger);
+}
+
+.toast[data-kind="info"] {
+  border-left-color: var(--ms-info);
+}

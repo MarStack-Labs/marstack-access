@@ -1,9 +1,12 @@
 package identity
 
 import (
+	"net"
 	"net/http"
 	"time"
 
+	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
+	"github.com/marstack-labs/marstack-access/internal/kernel/authz"
 	"github.com/marstack-labs/marstack-access/internal/kernel/fault"
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
 )
@@ -265,5 +268,114 @@ func (m *Module) handleRemoveKey(w http.ResponseWriter, r *http.Request) error {
 	m.emit(r.Context(), "key.removed", r.PathValue("id"), nil)
 
 	httpx.Write(w, http.StatusNoContent, nil)
+	return nil
+}
+
+type consoleSignInRequest struct {
+	Token string `json:"token"`
+}
+
+func overProtectedTransport(r *http.Request) error {
+	if r.TLS != nil {
+		return nil
+	}
+
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+
+	return fault.Forbidden("insecure_transport",
+		"the console will not open a session over cleartext. Reach the gateway over https, "+
+			"or terminate tls in a proxy on this host so the hop to the gateway stays on the loopback interface")
+}
+
+type consoleSessionView struct {
+	UserID   string `json:"user_id"`
+	UserName string `json:"user_name"`
+	Role     string `json:"role"`
+}
+
+func (m *Module) handleConsoleSignIn(w http.ResponseWriter, r *http.Request) error {
+	req, err := httpx.Decode[consoleSignInRequest](w, r)
+	if err != nil {
+		return err
+	}
+
+	if err := overProtectedTransport(r); err != nil {
+		authz.Emit(r.Context(), m.trail, m.log, audit.Event{
+			Action:  "console.signin",
+			Outcome: audit.OutcomeDenied,
+			Reason:  fault.From(err).Code,
+			Fields:  map[string]string{"remote": r.RemoteAddr},
+		})
+		return err
+	}
+
+	id, err := m.service.authenticate(r.Context(), req.Token)
+	if err != nil {
+		authz.Emit(r.Context(), m.trail, m.log, audit.Event{
+			Action:  "console.signin",
+			Outcome: audit.OutcomeDenied,
+			Reason:  fault.From(err).Code,
+			Fields:  map[string]string{"remote": r.RemoteAddr},
+		})
+		return err
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     authz.CookieName,
+		Value:    req.Token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+
+	authz.Emit(r.Context(), m.trail, m.log, audit.Event{
+		Action:    "console.signin",
+		ActorID:   id.UserID,
+		ActorName: id.Name,
+		Object:    id.CredentialID,
+		Fields:    map[string]string{"remote": r.RemoteAddr, "role": id.Role},
+	})
+
+	httpx.Write(w, http.StatusOK, consoleSessionView{
+		UserID:   id.UserID,
+		UserName: id.Name,
+		Role:     id.Role,
+	})
+	return nil
+}
+
+func (m *Module) handleConsoleSignOut(w http.ResponseWriter, r *http.Request) error {
+	http.SetCookie(w, &http.Cookie{
+		Name:     authz.CookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+
+	httpx.Write(w, http.StatusNoContent, nil)
+	return nil
+}
+
+func (m *Module) handleWhoAmI(w http.ResponseWriter, r *http.Request) error {
+	id, ok := authz.IdentityFrom(r.Context())
+	if !ok {
+		return fault.Internal(errUnauthenticatedRoute)
+	}
+
+	httpx.Write(w, http.StatusOK, consoleSessionView{
+		UserID:   id.UserID,
+		UserName: id.Name,
+		Role:     id.Role,
+	})
 	return nil
 }

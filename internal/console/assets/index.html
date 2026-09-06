@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en" data-surface="navy">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>marstack access</title>
+<link rel="stylesheet" href="meridian.css">
+<link rel="stylesheet" href="console.css">
+</head>
+<body class="ms-root">
+
+<div class="signin" id="signin" data-open="1" role="dialog" aria-modal="true" aria-labelledby="signin-title">
+  <form id="signin-form" autocomplete="off">
+    <div class="brand">
+      <b class="ms-wordmark">marstack</b>
+      <span class="ms-eyebrow">access</span>
+    </div>
+    <h1 id="signin-title" class="ms-eyebrow">sign in</h1>
+    <p>
+      Paste an API token. The browser never keeps it — the gateway swaps it for a cookie that
+      scripts on this page cannot read.
+    </p>
+    <label for="signin-token">API token</label>
+    <input class="ms-input" id="signin-token" type="password" placeholder="mat_…"
+           autocomplete="off" spellcheck="false" required>
+    <p class="problem" id="signin-problem" role="alert"></p>
+    <button class="ms-btn ms-btn-primary" id="signin-go" type="submit">Sign in</button>
+  </form>
+</div>
+
+<div class="shell" id="shell">
+  <aside class="rail">
+    <div class="brand">
+      <b class="ms-wordmark">marstack</b>
+      <span class="ms-eyebrow">access</span>
+    </div>
+    <nav id="nav">
+      <a class="ms-nav-item" href="#sessions" data-view="sessions">Sessions</a>
+      <a class="ms-nav-item" href="#requests" data-view="requests">Requests</a>
+    </nav>
+    <footer>
+      <b id="who">–</b>
+      <span id="who-role" class="ms-eyebrow">–</span>
+      <button class="ms-btn" id="signout" type="button">Sign out</button>
+    </footer>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <span class="ms-pill" id="health"><i></i>connecting</span>
+      <span class="ms-chip ms-mono" id="version">–</span>
+      <span class="grow"></span>
+      <span class="ms-mono ms-fg-faint" id="stamp"></span>
+      <label><input type="checkbox" id="auto" checked> auto 5s</label>
+      <button class="ms-btn" id="refresh" type="button">Refresh</button>
+    </div>
+
+    <section class="view" id="view-sessions" data-open="1">
+      <header>
+        <h1>Sessions</h1>
+        <p>
+          Every session this gateway has proxied. An active one holds a live socket, so closing it
+          ends the shell on the target immediately.
+        </p>
+      </header>
+      <div class="stats">
+        <div class="ms-stat"><b id="stat-active">–</b><span>active</span></div>
+        <div class="ms-stat"><b id="stat-total">–</b><span>recorded</span></div>
+      </div>
+      <div id="sessions-body"></div>
+    </section>
+
+    <section class="view" id="view-requests">
+      <header>
+        <h1>Requests</h1>
+        <p>
+          A policy says what may be granted; an approved request is what makes it live. A request
+          cannot be decided by the account that raised it, whatever role that account holds.
+        </p>
+      </header>
+      <div class="stats">
+        <div class="ms-stat"><b id="stat-pending">–</b><span>pending</span></div>
+        <div class="ms-stat"><b id="stat-granted">–</b><span>granted now</span></div>
+      </div>
+      <div id="requests-body"></div>
+    </section>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="console.js"></script>
+</body>
+</html>

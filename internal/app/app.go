@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/marstack-labs/marstack-access/internal/console"
 	"github.com/marstack-labs/marstack-access/internal/dataplane/certs"
 	"github.com/marstack-labs/marstack-access/internal/dataplane/sshd"
 	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
@@ -346,6 +347,13 @@ func (a *App) buildRouter() http.Handler {
 	mux := http.NewServeMux()
 	for _, m := range a.modules {
 		m.Routes(mux)
+	}
+
+	if handler, err := console.Handler(); err != nil {
+		a.log.Error("the console could not be mounted", "error", err.Error())
+	} else {
+		mux.Handle("GET "+console.Prefix, handler)
+		a.log.Info("console available", "path", console.Prefix)
 	}
 	return httpx.Chain(mux,
 		httpx.RequestID(),

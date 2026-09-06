@@ -203,6 +203,29 @@ belong to only one account, and `ssh-dss` and RSA under 2048 bits are refused wh
 rather than when a session fails. A key carries no privilege of its own — the account's role and
 policies decide everything.
 
+## The web console
+
+The gateway serves a console at `/console/` for the two jobs a terminal is bad at: watching live
+sessions and clearing the approval queue. It ships inside the binary — no build step, no
+`node_modules`, nothing fetched at runtime.
+
+```
+http://127.0.0.1:7443/console/
+```
+
+Sign in by pasting an API token, the same one `marac` uses. The page swaps it for an `HttpOnly`
+cookie immediately and never holds the credential itself. Everything the console shows comes from
+the public API under the caller's own role, so it can see exactly what that account's token can see
+and nothing more — a viewer is refused the session list here just as it is on the command line.
+
+**It will not open a session over cleartext.** Reach it over HTTPS, or terminate TLS in a proxy on
+the same host so the hop to the gateway stays on loopback. `http://127.0.0.1` works for local
+development. The reasoning is in [`docs/SECURITY.md`](docs/SECURITY.md).
+
+Sessions can be closed from the Sessions screen, and requests approved, denied, or withdrawn from
+the Requests screen. There is nothing the console can do that `marac` cannot; every button is a call
+to a documented endpoint.
+
 ## Connecting
 
 Start the SSH data plane alongside the control plane. It is off unless asked for:
@@ -364,6 +387,7 @@ make check      # vet, test, staticcheck, govulncheck, gosec
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | the modular monolith, the two planes, module layout, the access model |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | threat model, invariants, rules for connection code, exclusions |
 | [`docs/ENGINEERING-PRINCIPLES.md`](docs/ENGINEERING-PRINCIPLES.md) | working conventions, principles, and the rules that are easy to violate |
+| [`docs/adr/`](docs/adr) | decisions worth the argument they saved, with the options that lost |
 
 ## License
 

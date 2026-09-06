@@ -59,6 +59,12 @@ func withIdentity(ctx context.Context, id Identity) context.Context {
 	return context.WithValue(ctx, identityKey, id)
 }
 
+const (
+	CookieName = "marac_console"
+
+	ConsoleHeader = "X-Marac-Console"
+)
+
 func InvalidToken() error {
 	return fault.Unauthenticated("invalid_token",
 		"the token is missing, malformed, expired, or revoked")
@@ -121,7 +127,7 @@ func (g *Guard) Require(role string, next http.Handler) http.Handler {
 	}
 
 	return httpx.Wrap(g.log, func(w http.ResponseWriter, r *http.Request) error {
-		secret, ok := bearerToken(r)
+		secret, ok := credentialOf(r)
 		if !ok {
 			g.deny(r, "", "", "missing_token", role)
 			return InvalidToken()
@@ -160,6 +166,25 @@ func (g *Guard) deny(r *http.Request, actorID, actorName, reason, required strin
 
 func Discard() audit.Trail {
 	return audit.Discard()
+}
+
+func credentialOf(r *http.Request) (string, bool) {
+	if secret, ok := bearerToken(r); ok {
+		return secret, true
+	}
+	return consoleCookie(r)
+}
+
+func consoleCookie(r *http.Request) (string, bool) {
+	if r.Header.Get(ConsoleHeader) == "" {
+		return "", false
+	}
+
+	cookie, err := r.Cookie(CookieName)
+	if err != nil || cookie.Value == "" {
+		return "", false
+	}
+	return cookie.Value, true
 }
 
 func bearerToken(r *http.Request) (string, bool) {

@@ -197,6 +197,18 @@ func TestPlatformDoesNotImportTheDataPlane(t *testing.T) {
 	}
 }
 
+func TestTheConsoleIsAssetsAndNothingElse(t *testing.T) {
+	for _, f := range loadSources(t) {
+		if f.pkg != "internal/console" {
+			continue
+		}
+		for _, imp := range f.imports {
+			t.Errorf("%s imports %s: the console package serves files. Anything it needs to know about "+
+				"the platform belongs in the API the browser already calls", f.path, imp)
+		}
+	}
+}
+
 func TestEveryPlatformRouteDeclaresWhoMayCallIt(t *testing.T) {
 	root := repoRoot(t)
 	fset := token.NewFileSet()

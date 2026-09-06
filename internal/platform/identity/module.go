@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/marstack-labs/marstack-access/internal/kernel/httpx"
 	"github.com/marstack-labs/marstack-access/internal/store"
 )
+
+var errUnauthenticatedRoute = errors.New("identity: route reached without an identity on the context")
 
 type Guard interface {
 	Require(role string, next http.Handler) http.Handler
@@ -96,6 +99,13 @@ func (m *Module) Routes(mux *http.ServeMux) {
 		m.guard.Require(authz.RoleAdmin, httpx.Wrap(m.log, m.handleListKeys)))
 	mux.Handle("DELETE /v1/keys/{id}",
 		m.guard.Require(authz.RoleAdmin, httpx.Wrap(m.log, m.handleRemoveKey)))
+
+	mux.Handle("POST /v1/console/session",
+		authz.Public(httpx.Wrap(m.log, m.handleConsoleSignIn)))
+	mux.Handle("DELETE /v1/console/session",
+		authz.Public(httpx.Wrap(m.log, m.handleConsoleSignOut)))
+	mux.Handle("GET /v1/console/whoami",
+		m.guard.Require(authz.RoleViewer, httpx.Wrap(m.log, m.handleWhoAmI)))
 }
 
 func (m *Module) ByPublicKey(ctx context.Context, fingerprint string) (authz.Identity, error) {

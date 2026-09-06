@@ -142,6 +142,60 @@ token pasted into this repository fails the commit. The rule was verified agains
 running binary actually issued, because a scanner rule that matches nothing is worse than no rule —
 it reports success.
 
+## The web console
+
+The console at `/console/` is a browser client of the same API. It gets no privileged path, no
+handler of its own beyond static files, and no way to reach a module directly — see
+"The console is a client, not a module" in `docs/ARCHITECTURE.md`.
+
+Putting a token in a browser creates three problems the CLI does not have. Each is answered
+separately, because any one of the three answers alone is insufficient.
+
+**The page must never hold the token.** `POST /v1/console/session` takes the token once and returns
+a cookie: `HttpOnly`, `Secure`, `SameSite=Strict`, path `/`. `HttpOnly` is the load-bearing flag —
+it means a script injected into the page cannot read the credential, so an XSS becomes a
+same-session problem rather than a permanent stolen token. The cookie carries the token itself
+rather than a new session identifier, which keeps revocation exact: deleting the token closes the
+console at the same instant it closes every CLI using it, with no second table to keep in step.
+`console.js` never constructs an `Authorization` header and never touches `localStorage`; a test
+asserts both.
+
+**A cookie is sent by the browser whether or not the page asked.** That is what makes CSRF work, so
+the cookie alone authenticates nothing. `authz` accepts it only when `X-Marac-Console` is also
+present. A cross-site form post or image tag can send the cookie; it cannot set a custom header
+without a preflight this origin never grants. `SameSite=Strict` should stop the request first — the
+header requirement is the layer that still holds if a browser, a proxy, or a future same-site
+subdomain gets the first one wrong. Bearer tokens are unaffected: a request with an `Authorization`
+header is authenticated the way it always was, so `marac` and `curl` never send this header.
+
+**Sign-in is refused over cleartext.** The cookie is `Secure` unconditionally, so a browser on a
+plain-HTTP origin would discard it and leave the operator retyping a token into a page that never
+works. Rather than fail that way, `POST /v1/console/session` returns 403 `insecure_transport`
+unless the connection is TLS or the peer is on loopback. The standard deployment — TLS terminated
+by a proxy on the same host, forwarded to the gateway over `127.0.0.1` — satisfies the loopback
+case. `X-Forwarded-Proto` is deliberately not consulted: it is a header any client can set, and
+trusting it would turn the check into decoration.
+
+**The page runs under a policy with no inline anything.** `default-src 'self'` with no
+`unsafe-inline` and no `unsafe-eval`, plus `base-uri 'none'`, `object-src 'none'` and
+`frame-ancestors 'none'`. CSS and script are separate files for that reason rather than for tidiness.
+Tests fail the build if the HTML grows an inline `<script>`, an `on…=` attribute, or a `<style>`
+block, because a page can carry all three and look perfectly correct in review while being dead in
+a browser. The console handler answers `GET` and `HEAD` and rejects every other method.
+
+**Signing out clears the screen, not just the cookie.** The response expires the cookie, and the
+page drops the cached sessions, requests, and identity before showing the sign-in dialog. Otherwise
+the next person to sign in on that machine reads the previous account's data in the gap before the
+first refresh returns.
+
+**The console is not a way around a role.** Every list it renders is the same guarded endpoint the
+CLI calls, so a viewer signing in sees the gateway is alive and is refused the session list — the
+page says so rather than rendering an empty table that implies there is nothing to see. A requester
+looking at their own pending request is offered "withdraw" and a chip reading "yours" instead of
+approve and deny, which shows the self-approval rule rather than hiding it behind a 403 the operator
+has to provoke. The page hiding a button is presentation, not enforcement: the endpoints refuse the
+same call regardless, and "Just-in-time access" below is where that is proved.
+
 ## Authorization
 
 Roles are `viewer`, `operator`, `admin`, ranked in that order, and a check means *at least*. An
