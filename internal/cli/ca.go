@@ -14,8 +14,10 @@ func newCACmd() *cobra.Command {
 		Use:   "ca",
 		Short: "Manage the development signing authority",
 		Long: "Manage a signing authority held in a local file.\n\n" +
-			"This is a development mode. A production deployment keeps the signing key in\n" +
-			"marstack-secrets, so no process that terminates user traffic ever holds it.",
+			"This key can mint access to every target that trusts it, and a file on the gateway\n" +
+			"is the wrong place for it. Moving it behind a signing call in marstack-secrets is\n" +
+			"planned and not built, so today this is the only way to sign. Treat the file\n" +
+			"accordingly: see docs/SECURITY.md, invariant 3.",
 	}
 	cmd.AddCommand(newCAInitCmd(), newCAShowCmd())
 	return cmd

@@ -15,10 +15,12 @@ an attacker most wants.
 
 This one inverts that.
 
-- **No standing credentials.** There is no target password, target key, or CA private key in the
-  binary or its database. Reading the whole database gives an attacker no way to authenticate to any
-  target. Sessions authenticate with certificates minted per session, scoped to one principal, one
-  target, and a validity window measured in minutes.
+- **No standing credentials.** There is no target password and no target key anywhere. Reading the
+  whole database gives an attacker no way to authenticate to any target. Sessions authenticate with
+  certificates minted per session, scoped to one principal, one target, and a validity window
+  measured in minutes. The CA signing key is the one exception and it is not solved yet — today it
+  sits in a file on the gateway. [`docs/SECURITY.md`](docs/SECURITY.md) invariant 3 says exactly
+  what that costs and what would close it.
 - **Agentless.** Nothing is installed on a target. A target opts in with two files in its `sshd`
   configuration, and `sshd` — not our code — enforces the certificate's principal, expiry, and
   source address.
@@ -333,8 +335,8 @@ command line is visible in `ps`. The local copy is kept: uploading never deletes
 recordings is a job for outside this process, done after confirming the object exists.
 
 > `--dev-ca-key` holds the signing key in a local file. Without it the front door still authorises
-> but cannot connect, and it says so. See [`docs/SECURITY.md`](docs/SECURITY.md) for what the
-> development mode costs.
+> but cannot connect, and it says so. That file is the platform's weakest point today — see
+> [`docs/SECURITY.md`](docs/SECURITY.md) invariant 3.
 
 ## Preparing a target
 
@@ -360,9 +362,10 @@ Sessions authenticate with a certificate minted for that session alone: one prin
 gateway's own IP, valid for minutes, and carrying `permit-pty` and nothing else — so port forwarding
 and agent forwarding are not granted on the target either.
 
-> `marac ca` keeps the signing key in a local file. That is a development mode, and
-> [`docs/SECURITY.md`](docs/SECURITY.md) says what it costs. A production deployment keeps the key in
-> `marstack-secrets`, so no process that terminates user traffic ever holds it.
+> `marac ca` keeps the signing key in a local file, and that is currently the only way to sign.
+> Anyone who can read that file can mint access to every target that trusts the CA. Moving it behind
+> a signing call in `marstack-secrets` is the plan and is not built.
+> [`docs/SECURITY.md`](docs/SECURITY.md) invariant 3 has the detail.
 
 The client talks to `$MARAC_ENDPOINT`, or `--endpoint`, or loopback. `--output json` prints the raw
 API response for scripting:

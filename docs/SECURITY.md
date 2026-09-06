@@ -37,18 +37,26 @@ These hold everywhere. A change that weakens one is a design change, not a refac
    authenticate to any target. This is why the platform is a certificate authority client and not a
    credential vault.
 
-   The signing key is the one credential that could mint access. On the production path it is held
-   by `marstack-secrets` behind a signing call, and this process never sees it. **A development mode
-   breaks that, deliberately and visibly:** `certs.FileSigner` loads a signing key from a local file
-   so the platform can run end to end before `marstack-secrets` is deployed.
+   The signing key is the one credential that could mint access, and **the half of this invariant
+   that covers it is not built yet.** The intended design is that the key lives in
+   `marstack-secrets` behind a signing call, so the gateway sends a public key and gets a
+   certificate back and never holds the key at all. No such call exists: `marstack-secrets` today
+   stores and returns values and has no signing engine, and this repository has no client for it.
 
-   It is not a default and cannot become one by accident. The key has to be created by name with
-   `marac ca init --path`, and the server has to be pointed at it explicitly. A deployment that
-   never passes that path holds no signing key, and this invariant reads exactly as it did before. A
-   deployment that does pass it has moved the trust boundary into the gateway and should know it.
+   **What exists is a development mode, and it is the only mode.** `certs.FileSigner` loads a
+   signing key from a local file, so a deployment that wants working sessions holds a key that can
+   mint access to every target that trusts the CA. Anyone who can read that file, or the memory of
+   this process, has it.
 
-   This paragraph exists rather than a quiet edit to the sentence above. An invariant that stops
-   being true without saying so is worse than one that was never claimed.
+   It cannot happen by accident. The key has to be created by name with `marac ca init --path` and
+   the server pointed at it explicitly; a deployment that never passes that path holds no signing
+   key and cannot open sessions at all, which is the configuration this invariant describes fully.
+   Startup logs the fingerprint at `WARN` with a note saying where it belongs, so the trust boundary
+   is visible rather than assumed.
+
+   Read the first sentence of this invariant as true today and the signing key as the named
+   exception, not as a detail. It is stated at this length because an invariant that quietly stops
+   being true is worse than one that was never claimed.
 
 4. **Identity is derived, never asserted.** The principal a session lands as comes from the
    authenticated identity and the matching grant, never from a field in a request body. This is the
@@ -83,7 +91,7 @@ These hold everywhere. A change that weakens one is a design change, not a refac
 |---|---|
 | Deny by default | `kernel/fault` defaults to `Internal`; authorization middleware refuses routes that declare no policy |
 | Validate at the boundary | `httpx.Decode` sets `DisallowUnknownFields` and caps body size; `kernel/validate` |
-| No standing credential | there is no schema for one; the signing call lives in `marstack-secrets`, and the file-backed development signer must be named on the command line |
+| No standing credential | there is no schema for one; **the signing key is the exception — it sits in a local file and is not yet behind a call in `marstack-secrets`** |
 | Derived identity | authorization middleware puts the identity on the request context; handlers read it from there |
 | Recording is mandatory | the recorder is opened before the target is dialed, and a failure to open it refuses the session |
 | Scoped authority | one place builds the certificate request; principal, target, TTL, and source address are all required fields |
@@ -608,6 +616,13 @@ A credential that can delete makes the code's inability to delete beside the poi
 [`adr/0001-write-sigv4-rather-than-add-an-sdk.md`](adr/0001-write-sigv4-rather-than-add-an-sdk.md).
 
 ### What is not covered yet
+
+**The signing key has no home outside this process.** Invariant 3 describes it in full, and it is
+the largest open item in this document. Every session certificate is minted by a key sitting in a
+file on the gateway, and the gateway is the host most worth attacking. Closing it needs a signing
+engine in `marstack-secrets` — send a public key, a principal, a TTL and a source address, get a
+certificate back — which does not exist yet. Fetching the key over the network instead would move
+where it is stored without changing who can read it, so it is not a shortcut worth taking.
 
 **Control plane events are written after the change is committed.** A crash between the database
 commit and the audit write loses the event while keeping the change. Writing the event first would
