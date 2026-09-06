@@ -1,13 +1,14 @@
 const REFRESH_MS = 5000;
 const CONSOLE_HEADER = "X-Marac-Console";
+const AUDIT_LIMIT = 200;
+
+const RANK = { viewer: 1, operator: 2, admin: 3 };
 
 const state = {
-  sessions: [],
-  requests: [],
-  sessionsDenied: false,
-  requestsDenied: false,
+  view: "sessions",
   me: null,
   timer: null,
+  targets: new Map(),
 };
 
 const $ = (id) => document.getElementById(id);
@@ -39,7 +40,11 @@ function toast(kind, title, detail) {
 }
 
 async function api(method, path, body) {
-  const options = { method, headers: { [CONSOLE_HEADER]: "1" } };
+  const options = {
+    method,
+    credentials: "same-origin",
+    headers: { [CONSOLE_HEADER]: "1" },
+  };
   if (body !== undefined) {
     options.headers["Content-Type"] = "application/json";
     options.body = JSON.stringify(body);
@@ -74,18 +79,17 @@ async function api(method, path, body) {
 }
 
 function forget() {
-  state.sessions = [];
-  state.requests = [];
-  state.sessionsDenied = false;
-  state.requestsDenied = false;
   state.me = null;
+  state.targets = new Map();
 
   wear(null);
-  for (const id of ["stat-active", "stat-total", "stat-pending", "stat-granted"]) {
-    $(id).textContent = "–";
+  for (const stat of document.querySelectorAll(".ms-stat b")) {
+    stat.textContent = "–";
   }
-  $("sessions-body").replaceChildren();
-  $("requests-body").replaceChildren();
+  for (const body of document.querySelectorAll(".view > div[id$='-body']")) {
+    body.replaceChildren();
+  }
+  $("audit-notice").dataset.open = "0";
 }
 
 function showSignIn(message) {
@@ -134,6 +138,16 @@ function wear(me) {
   state.me = me;
   $("who").textContent = me ? me.user_name : "–";
   $("who-role").textContent = me ? me.role : "–";
+
+  const held = me ? RANK[me.role] || 0 : 0;
+  for (const link of document.querySelectorAll("#nav a")) {
+    const needed = RANK[link.dataset.needs] || 0;
+    link.dataset.reachable = held >= needed ? "1" : "0";
+  }
+}
+
+function holds(role) {
+  return state.me ? (RANK[state.me.role] || 0) >= RANK[role] : false;
 }
 
 function relative(iso) {
@@ -156,17 +170,16 @@ function until(iso) {
   return `${Math.round(seconds / 3600)}h left`;
 }
 
-function pill(state_, label) {
-  return el("span", { class: `ms-pill ms-pill-${state_}` }, el("i", {}), label);
+const TONES = ["ok", "danger", "warn", "info", "pending", "idle"];
+
+function pill(tone, label) {
+  const known = TONES.includes(tone) ? tone : "idle";
+  return el("span", { class: `ms-pill ms-pill-${known}` }, el("i", {}), label);
 }
 
-const REQUEST_STATES = {
-  pending: "pending",
-  approved: "ok",
-  denied: "danger",
-  cancelled: "idle",
-  expired: "idle",
-};
+function mono(text) {
+  return el("span", { class: "ms-mono" }, text);
+}
 
 function table(headers, rows) {
   return el("table", { class: "ms-table" },
@@ -174,44 +187,55 @@ function table(headers, rows) {
     el("tbody", {}, rows));
 }
 
-function renderSessions() {
+function empty(body, message) {
+  body.replaceChildren(el("p", { class: "empty" }, message));
+}
+
+function refused(body, role) {
+  empty(body, `Reading this needs the ${role} role. This account holds `
+    + (state.me ? state.me.role : "less") + ".");
+}
+
+function targetName(id) {
+  return state.targets.get(id) || id;
+}
+
+async function loadTargetNames() {
+  const { ok, data } = await api("GET", "/v1/targets");
+  if (!ok || !data) return;
+  state.targets = new Map(data.targets.map((t) => [t.id, t.name]));
+}
+
+async function loadSessions() {
   const body = $("sessions-body");
-  body.replaceChildren();
+  const { ok, status, data, detail } = await api("GET", "/v1/sessions");
 
-  const active = state.sessions.filter((s) => s.active);
+  if (status === 403) return refused(body, "operator");
+  if (!ok) return empty(body, detail || "the session list could not be read");
+
+  const sessions = data.sessions || [];
+  const active = sessions.filter((s) => s.active);
   $("stat-active").textContent = active.length;
-  $("stat-total").textContent = state.sessions.length;
+  $("stat-total").textContent = sessions.length;
 
-  if (state.sessionsDenied) {
-    body.append(el("p", { class: "empty" },
-      "Reading sessions needs the operator role. This account holds "
-      + (state.me ? state.me.role : "less") + "."));
-    return;
+  if (sessions.length === 0) {
+    return empty(body, "No session has been opened through this gateway yet.");
   }
 
-  if (state.sessions.length === 0) {
-    body.append(el("p", { class: "empty" }, "No session has been opened through this gateway yet."));
-    return;
-  }
-
-  const rows = state.sessions.map((s) => el("tr", {},
+  const rows = sessions.map((s) => el("tr", {},
     el("td", {}, s.active ? pill("ok", "active") : pill("idle", "closed")),
-    el("td", {}, el("span", { class: "ms-mono" }, s.id)),
+    el("td", {}, mono(s.id)),
     el("td", {}, s.user_name),
     el("td", {}, s.target_name),
-    el("td", {}, el("span", { class: "ms-mono" }, s.principal)),
+    el("td", {}, mono(s.principal)),
     el("td", {}, relative(s.started_at)),
     el("td", {}, el("span", { class: "reason", title: s.reason || "" }, s.reason || "–")),
     el("td", { class: "actions" }, s.active
-      ? el("button", {
-          class: "ms-btn ms-btn-danger",
-          onclick: () => kill(s),
-        }, "Close")
+      ? el("button", { class: "ms-btn ms-btn-danger", onclick: () => kill(s) }, "Close")
       : null)));
 
-  body.append(table(
-    ["State", "Session", "User", "Target", "Principal", "Started", "Reason", ""],
-    rows));
+  body.replaceChildren(table(
+    ["State", "Session", "User", "Target", "Principal", "Started", "Reason", ""], rows));
 }
 
 async function kill(session) {
@@ -228,59 +252,60 @@ async function kill(session) {
   await refresh();
 }
 
-function renderRequests() {
+const REQUEST_TONES = {
+  pending: "pending",
+  approved: "ok",
+  denied: "danger",
+  cancelled: "idle",
+  expired: "idle",
+};
+
+async function loadRequests() {
   const body = $("requests-body");
-  body.replaceChildren();
+  const [requests] = await Promise.all([
+    api("GET", "/v1/access-requests"),
+    loadTargetNames(),
+  ]);
 
-  const pending = state.requests.filter((r) => r.state === "pending");
-  const granted = state.requests.filter((r) => r.state === "approved");
-  $("stat-pending").textContent = pending.length;
-  $("stat-granted").textContent = granted.length;
+  if (requests.status === 403) return refused(body, "operator");
+  if (!requests.ok) return empty(body, requests.detail || "the request list could not be read");
 
-  if (state.requestsDenied) {
-    body.append(el("p", { class: "empty" },
-      "Reading access requests needs the operator role. This account holds "
-      + (state.me ? state.me.role : "less") + "."));
-    return;
+  const all = requests.data.requests || [];
+  $("stat-pending").textContent = all.filter((r) => r.state === "pending").length;
+  $("stat-granted").textContent = all.filter((r) => r.state === "approved").length;
+
+  if (all.length === 0) {
+    return empty(body, "Nobody has asked for access yet.");
   }
 
-  if (state.requests.length === 0) {
-    body.append(el("p", { class: "empty" }, "Nobody has asked for access yet."));
-    return;
-  }
-
-  const mine = (r) => state.me && r.requester_id === state.me.user_id;
-  const admin = state.me && state.me.role === "admin";
-
-  const rows = state.requests.map((r) => el("tr", {},
-    el("td", {}, pill(REQUEST_STATES[r.state] || "idle", r.state)),
-    el("td", {}, el("span", { class: "ms-mono" }, r.id)),
-    el("td", {}, el("span", { class: "ms-mono" }, r.requester_id)),
-    el("td", {}, el("span", { class: "ms-mono" }, r.principal)),
+  const rows = all.map((r) => el("tr", {},
+    el("td", {}, pill(REQUEST_TONES[r.state] || "idle", r.state)),
+    el("td", {}, mono(r.id)),
+    el("td", {}, mono(r.requester_id)),
+    el("td", {}, targetName(r.target_id)),
+    el("td", {}, mono(r.principal)),
     el("td", {}, el("span", { class: "reason", title: r.reason }, r.reason)),
     el("td", {}, r.state === "approved" ? until(r.grant_expires_at) : relative(r.created_at)),
-    el("td", { class: "actions" }, decisionsFor(r, mine(r), admin))));
+    el("td", { class: "actions" }, decisionsFor(r))));
 
-  body.append(table(
-    ["State", "Request", "Requester", "Principal", "Reason", "Window", ""],
-    rows));
+  body.replaceChildren(table(
+    ["State", "Request", "Requester", "Target", "Principal", "Reason", "Window", ""], rows));
 }
 
-function decisionsFor(request, isMine, isAdmin) {
+function decisionsFor(request) {
   if (request.state !== "pending") return null;
 
-  if (isMine) {
+  if (state.me && request.requester_id === state.me.user_id) {
     return [
-      el("button", {
-        class: "ms-btn",
-        onclick: () => decide(request, "cancel"),
-      }, "Withdraw"),
-      el("span", { class: "ms-chip", title: "A request cannot be decided by the account that raised it" },
-        "yours"),
+      el("button", { class: "ms-btn", onclick: () => decide(request, "cancel") }, "Withdraw"),
+      el("span", {
+        class: "ms-chip",
+        title: "A request cannot be decided by the account that raised it",
+      }, "yours"),
     ];
   }
 
-  if (!isAdmin) return null;
+  if (!holds("admin")) return null;
 
   return [
     el("button", { class: "ms-btn ms-btn-primary", onclick: () => decide(request, "approve") }, "Approve"),
@@ -304,31 +329,145 @@ async function decide(request, verb) {
   await refresh();
 }
 
-async function refresh() {
-  const [version, sessions, requests] = await Promise.all([
-    api("GET", "/v1/version"),
-    api("GET", "/v1/sessions"),
-    api("GET", "/v1/access-requests"),
+async function loadTargets() {
+  const body = $("targets-body");
+  const { ok, status, data, detail } = await api("GET", "/v1/targets");
+
+  if (status === 403) return refused(body, "operator");
+  if (!ok) return empty(body, detail || "the target list could not be read");
+
+  const targets = data.targets || [];
+  state.targets = new Map(targets.map((t) => [t.id, t.name]));
+
+  const unpinned = targets.filter((t) => !t.host_key_fingerprint);
+  $("stat-targets").textContent = targets.length;
+  $("stat-unpinned").textContent = unpinned.length;
+
+  if (targets.length === 0) {
+    return empty(body, "No host has been registered yet. Until one is, there is nowhere to go.");
+  }
+
+  const rows = targets.map((t) => el("tr", {},
+    el("td", {}, t.host_key_fingerprint
+      ? pill("ok", "pinned")
+      : pill("danger", "no host key")),
+    el("td", {}, t.name),
+    el("td", {}, mono(`${t.address}:${t.port}`)),
+    el("td", {}, (t.principals || []).map((p) => el("span", { class: "ms-chip ms-mono" }, p))),
+    el("td", {}, t.host_key_fingerprint
+      ? el("span", { class: "reason ms-mono", title: t.host_key_fingerprint }, t.host_key_fingerprint)
+      : el("span", { class: "ms-fg-faint" }, "sessions to it are refused")),
+    el("td", {}, mono(t.id))));
+
+  body.replaceChildren(table(
+    ["Host key", "Name", "Address", "Principals", "Fingerprint", "Id"], rows));
+}
+
+async function loadPolicies() {
+  const body = $("policies-body");
+  const [policies] = await Promise.all([
+    api("GET", "/v1/policies"),
+    loadTargetNames(),
   ]);
 
-  if (version.status === 401) return;
+  if (policies.status === 403) return refused(body, "admin");
+  if (!policies.ok) return empty(body, policies.detail || "the policy list could not be read");
 
-  state.sessions = sessions.ok && sessions.data ? sessions.data.sessions : [];
-  state.requests = requests.ok && requests.data ? requests.data.requests : [];
-  state.sessionsDenied = sessions.status === 403;
-  state.requestsDenied = requests.status === 403;
+  const all = policies.data.policies || [];
+  $("stat-policies").textContent = all.length;
+
+  if (all.length === 0) {
+    return empty(body, "No policy exists, so nothing can be granted to anyone.");
+  }
+
+  const rows = all.map((p) => el("tr", {},
+    el("td", {}, p.name),
+    el("td", {}, el("span", { class: "ms-chip" }, p.subject_kind), " ", mono(p.subject_id)),
+    el("td", {}, targetName(p.target_id)),
+    el("td", {}, (p.principals || []).map((v) => el("span", { class: "ms-chip ms-mono" }, v))),
+    el("td", {}, relative(p.created_at))));
+
+  body.replaceChildren(table(
+    ["Policy", "Subject", "Target", "May land as", "Created"], rows));
+}
+
+const OUTCOME_TONES = {
+  allowed: "ok",
+  denied: "danger",
+  error: "warn",
+};
+
+async function loadAudit() {
+  const body = $("audit-body");
+  const notice = $("audit-notice");
+  const { ok, status, data, detail } = await api("GET", `/v1/audit?limit=${AUDIT_LIMIT}`);
+
+  if (status === 403) {
+    notice.dataset.open = "0";
+    return refused(body, "admin");
+  }
+  if (!ok) {
+    notice.dataset.open = "0";
+    return empty(body, detail || "the trail could not be read");
+  }
+
+  const events = data.events || [];
+  $("stat-events").textContent = events.length;
+  $("stat-denied").textContent = events.filter((e) => e.outcome === "denied").length;
+
+  notice.dataset.open = "1";
+  notice.textContent = data.shipped
+    ? `Showing the last ${events.length} events written on this host. They are also shipped off it.`
+    : `Showing the last ${events.length} events. Nothing ships this trail anywhere, so it survives `
+      + "a crash but not whoever owns this host. Start the gateway with --audit-loki-url to change that.";
+  notice.dataset.tone = data.shipped ? "ok" : "warn";
+
+  if (events.length === 0) {
+    return empty(body, "The trail is empty.");
+  }
+
+  const rows = events.map((e) => el("tr", {},
+    el("td", {}, mono(e.at.replace("T", " ").replace("Z", ""))),
+    el("td", {}, pill(OUTCOME_TONES[e.outcome] || "idle", e.outcome || "allowed")),
+    el("td", {}, mono(e.action)),
+    el("td", {}, e.actor_name || el("span", { class: "ms-fg-faint" }, "system")),
+    el("td", {}, e.object ? mono(e.object) : "–"),
+    el("td", {}, el("span", { class: "reason", title: describe(e) }, describe(e)))));
+
+  body.replaceChildren(table(
+    ["When (UTC)", "Outcome", "Action", "Actor", "Object", "Detail"], rows));
+}
+
+function describe(event) {
+  const parts = [];
+  if (event.reason) parts.push(event.reason);
+  for (const [key, value] of Object.entries(event.fields || {})) {
+    parts.push(`${key}=${value}`);
+  }
+  return parts.join("  ") || "–";
+}
+
+const VIEWS = {
+  sessions: loadSessions,
+  requests: loadRequests,
+  targets: loadTargets,
+  policies: loadPolicies,
+  audit: loadAudit,
+};
+
+async function refresh() {
+  const version = await api("GET", "/v1/version");
+  if (version.status === 401) return;
 
   const health = $("health");
   health.className = `ms-pill ms-pill-${version.ok ? "ok" : "danger"}`;
   health.replaceChildren(el("i", {}), version.ok ? "healthy" : "unreachable");
-
   if (version.ok && version.data) {
     $("version").textContent = version.data.version;
   }
-  $("stamp").textContent = new Date().toLocaleTimeString();
 
-  renderSessions();
-  renderRequests();
+  await VIEWS[state.view]();
+  $("stamp").textContent = new Date().toLocaleTimeString();
 }
 
 function startPolling() {
@@ -346,6 +485,7 @@ function stopPolling() {
 }
 
 function showView(name) {
+  state.view = name;
   for (const view of document.querySelectorAll(".view")) {
     view.dataset.open = view.id === `view-${name}` ? "1" : "0";
   }
@@ -359,8 +499,13 @@ function showView(name) {
 }
 
 function routeFromHash() {
-  const name = location.hash.replace("#", "") || "sessions";
-  showView(name === "requests" ? "requests" : "sessions");
+  const name = location.hash.replace("#", "");
+  showView(Object.hasOwn(VIEWS, name) ? name : "sessions");
+}
+
+async function onRoute() {
+  routeFromHash();
+  if (state.me) await refresh();
 }
 
 async function start() {
@@ -379,7 +524,7 @@ $("signin-form").addEventListener("submit", signIn);
 $("signout").addEventListener("click", signOut);
 $("refresh").addEventListener("click", refresh);
 $("auto").addEventListener("change", startPolling);
-window.addEventListener("hashchange", routeFromHash);
+window.addEventListener("hashchange", onRoute);
 
 routeFromHash();
 start();

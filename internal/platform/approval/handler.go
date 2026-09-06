@@ -189,17 +189,21 @@ func (m *Module) decide(w http.ResponseWriter, r *http.Request, fn decider,
 		return err
 	}
 
+	fields := map[string]string{
+		"requester": req.RequesterID,
+		"target":    req.TargetID,
+		"principal": req.Principal,
+	}
+	if !req.GrantExpiresAt.IsZero() {
+		fields["expires"] = req.GrantExpiresAt.UTC().Format(time.RFC3339)
+	}
+
 	authz.Emit(r.Context(), m.trail, m.log, audit.Event{
 		Action:  action,
 		Outcome: outcome,
 		Object:  req.ID,
 		Reason:  req.Reason,
-		Fields: map[string]string{
-			"requester": req.RequesterID,
-			"target":    req.TargetID,
-			"principal": req.Principal,
-			"expires":   req.GrantExpiresAt.UTC().Format(time.RFC3339),
-		},
+		Fields:  fields,
 	})
 
 	httpx.Write(w, http.StatusOK, m.viewOf(req))

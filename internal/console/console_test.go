@@ -51,6 +51,72 @@ func TestEveryElementTheScriptReachesForExists(t *testing.T) {
 	}
 }
 
+func TestEveryThemeTokenTheStylesheetUsesIsDefined(t *testing.T) {
+	theme := read(t, "meridian.css")
+	page := read(t, "console.css")
+
+	defined := map[string]bool{}
+	for _, token := range matches(`(--ms-[a-z0-9-]+)\s*:`, theme) {
+		defined[token] = true
+	}
+
+	used := matches(`var\((--ms-[a-z0-9-]+)\)`, page)
+	if len(used) == 0 {
+		t.Fatal("console.css uses no theme token, so it is not on the design system")
+	}
+
+	for _, token := range used {
+		if !defined[token] {
+			t.Errorf("console.css uses %s, which meridian.css does not define. "+
+				"An undefined custom property resolves to nothing and the rule is dropped silently", token)
+		}
+	}
+}
+
+func TestEveryThemeClassTheMarkupUsesIsDefined(t *testing.T) {
+	stylesheets := read(t, "meridian.css") + read(t, "console.css")
+	markup := read(t, "index.html") + read(t, "console.js")
+
+	defined := map[string]bool{}
+	for _, class := range matches(`\.(ms-[a-z0-9-]+)`, stylesheets) {
+		defined[class] = true
+	}
+
+	seen := map[string]bool{}
+	for _, class := range matches(`(ms-[a-z0-9]+(?:-[a-z0-9]+)*)`, markup) {
+		if seen[class] || defined[class] {
+			continue
+		}
+		seen[class] = true
+		t.Errorf("the console uses the class %q, which no stylesheet defines. "+
+			"A theme token of the same name is not a class: the element renders unstyled "+
+			"and nothing reports it", class)
+	}
+}
+
+func TestEveryToneTheScriptCanRenderHasAPill(t *testing.T) {
+	script := read(t, "console.js")
+	theme := read(t, "meridian.css")
+
+	declared := matches(`const TONES = \[([^\]]+)\]`, script)
+	if len(declared) != 1 {
+		t.Fatal("console.js does not declare a single TONES list, so the tones it builds " +
+			"class names from cannot be checked here")
+	}
+
+	tones := matches(`"([a-z]+)"`, declared[0])
+	if len(tones) == 0 {
+		t.Fatal("the TONES list is empty")
+	}
+
+	for _, tone := range tones {
+		if !strings.Contains(theme, ".ms-pill-"+tone) {
+			t.Errorf("the script can render the tone %q, but meridian.css has no .ms-pill-%s. "+
+				"The class name is built at runtime, so nothing else would catch this", tone, tone)
+		}
+	}
+}
+
 func TestEveryFileThePageAsksForIsEmbedded(t *testing.T) {
 	page := read(t, "index.html")
 

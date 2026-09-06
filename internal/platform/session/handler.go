@@ -2,6 +2,7 @@ package session
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/marstack-labs/marstack-access/internal/kernel/audit"
@@ -116,19 +117,16 @@ func (m *Module) handleKill(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	outcome := audit.OutcomeAllowed
-	if !killed {
-		outcome = audit.OutcomeError
-	}
 	authz.Emit(r.Context(), m.trail, m.log, audit.Event{
 		Action:  "session.killed",
-		Outcome: outcome,
+		Outcome: audit.OutcomeAllowed,
 		Object:  record.ID,
 		Fields: map[string]string{
 			"user":      record.UserName,
 			"target":    record.TargetName,
 			"principal": record.Principal,
 			"recording": record.Recording,
+			"closed":    strconv.FormatBool(killed),
 		},
 	})
 

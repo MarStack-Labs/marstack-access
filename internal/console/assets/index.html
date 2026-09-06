@@ -36,8 +36,11 @@
       <span class="ms-eyebrow">access</span>
     </div>
     <nav id="nav">
-      <a class="ms-nav-item" href="#sessions" data-view="sessions">Sessions</a>
-      <a class="ms-nav-item" href="#requests" data-view="requests">Requests</a>
+      <a class="ms-nav-item" href="#sessions" data-view="sessions" data-needs="operator">Sessions</a>
+      <a class="ms-nav-item" href="#requests" data-view="requests" data-needs="operator">Requests</a>
+      <a class="ms-nav-item" href="#targets" data-view="targets" data-needs="operator">Targets</a>
+      <a class="ms-nav-item" href="#policies" data-view="policies" data-needs="admin">Policies</a>
+      <a class="ms-nav-item" href="#audit" data-view="audit" data-needs="admin">Audit</a>
     </nav>
     <footer>
       <b id="who">–</b>
@@ -84,6 +87,51 @@
         <div class="ms-stat"><b id="stat-granted">–</b><span>granted now</span></div>
       </div>
       <div id="requests-body"></div>
+    </section>
+
+    <section class="view" id="view-targets">
+      <header>
+        <h1>Targets</h1>
+        <p>
+          Hosts this platform may reach. A target with no pinned host key cannot be connected to at
+          all — its identity cannot be verified, so a session to it is refused before it is opened.
+        </p>
+      </header>
+      <div class="stats">
+        <div class="ms-stat"><b id="stat-targets">–</b><span>registered</span></div>
+        <div class="ms-stat"><b id="stat-unpinned">–</b><span>unreachable</span></div>
+      </div>
+      <div id="targets-body"></div>
+    </section>
+
+    <section class="view" id="view-policies">
+      <header>
+        <h1>Policies</h1>
+        <p>
+          What each subject may be granted: which target, as which account. A policy is a bound, not
+          an entitlement — reaching a target still needs an approved request inside its window.
+        </p>
+      </header>
+      <div class="stats">
+        <div class="ms-stat"><b id="stat-policies">–</b><span>policies</span></div>
+      </div>
+      <div id="policies-body"></div>
+    </section>
+
+    <section class="view" id="view-audit">
+      <header>
+        <h1>Audit</h1>
+        <p>
+          The tail of the trail this gateway wrote. Nothing here can be edited or deleted through
+          the platform; retention belongs to whatever stores the events.
+        </p>
+      </header>
+      <div class="stats">
+        <div class="ms-stat"><b id="stat-events">–</b><span>events shown</span></div>
+        <div class="ms-stat"><b id="stat-denied">–</b><span>denied</span></div>
+      </div>
+      <p class="notice" id="audit-notice" data-open="0"></p>
+      <div id="audit-body"></div>
     </section>
   </div>
 </div>
