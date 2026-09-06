@@ -26,6 +26,7 @@ import (
 	"github.com/marstack-labs/marstack-access/internal/platform/session"
 	"github.com/marstack-labs/marstack-access/internal/platform/system"
 	"github.com/marstack-labs/marstack-access/internal/platform/target"
+	"github.com/marstack-labs/marstack-access/internal/platform/trail"
 	"github.com/marstack-labs/marstack-access/internal/store"
 )
 
@@ -132,6 +133,7 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 		return a.sshd.Kill(sessionID)
 	}), a.trail)
 
+	trailPath := a.sink.Path()
 	a.modules = []Module{
 		system.New(st, log, guard),
 		idm,
@@ -139,6 +141,9 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 		policies,
 		grants,
 		sessions,
+		trail.New(func(limit int) ([]audit.Event, error) {
+			return audit.Tail(trailPath, limit)
+		}, cfg.LokiURL != "", log, guard),
 	}
 
 	if err := a.migrate(ctx); err != nil {
