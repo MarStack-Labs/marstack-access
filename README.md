@@ -4,8 +4,11 @@ Identity-aware access platform for Linux infrastructure. Users reach a target th
 around it, and it holds no credential that is useful to an attacker who is not inside an approved
 session.
 
-> Pre-release. No tagged releases, no stability guarantees, and nothing you care about should run
-> behind it yet.
+**[Usage guide →](https://marstack-labs.github.io/marstack-access/)**
+
+> Pre-release. Read [what is not covered yet](docs/SECURITY.md) before putting this in front of
+> anything you care about — in particular, the CA signing key currently sits in a file on the
+> gateway.
 
 ## What makes it different
 
@@ -387,6 +390,7 @@ make check      # vet, test, staticcheck, govulncheck, gosec
 
 | Document | Covers |
 |---|---|
+| [Usage guide](https://marstack-labs.github.io/marstack-access/) | install, first run, targets, policy, just-in-time access, connecting, the console |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | the modular monolith, the two planes, module layout, the access model |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | threat model, invariants, rules for connection code, exclusions |
 | [`docs/ENGINEERING-PRINCIPLES.md`](docs/ENGINEERING-PRINCIPLES.md) | working conventions, principles, and the rules that are easy to violate |

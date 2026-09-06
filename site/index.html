@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="en" data-surface="navy">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>marstack-access — identity-aware access for Linux infrastructure</title>
+<meta name="description" content="An SSH gateway that holds no credential useful to an attacker. Per-session certificates, just-in-time access, greppable recordings, an audit trail that can only grow.">
+<link rel="stylesheet" href="meridian.css">
+<link rel="stylesheet" href="site.css">
+</head>
+<body class="ms-root">
+
+<nav class="top">
+  <b class="ms-wordmark">marstack</b>
+  <span class="ms-eyebrow">access</span>
+  <span class="grow"></span>
+  <a href="#quickstart">Quickstart</a>
+  <a href="#connecting">Connecting</a>
+  <a href="#console">Console</a>
+  <a href="https://github.com/MarStack-Labs/marstack-access">GitHub</a>
+</nav>
+
+<header class="hero">
+  <span class="ms-pill ms-pill-pending"><i></i>pre-release · v0.1.0</span>
+  <h1>Reach a Linux host through it, never around it.</h1>
+  <p class="lede">
+    An SSH gateway that stores no target password and no target key. Every session authenticates
+    with a certificate minted for that session alone, and the user never receives it.
+  </p>
+
+  <div class="cards">
+    <div class="card">
+      <b>No standing credentials</b>
+      <span>Read the whole database and you still cannot log into anything.</span>
+    </div>
+    <div class="card">
+      <b>Agentless</b>
+      <span>Two lines of <code>sshd_config</code> on the target. Nothing installed.</span>
+    </div>
+    <div class="card">
+      <b>Greppable sessions</b>
+      <span>asciicast, not video. "Who ran this last month" is a query.</span>
+    </div>
+    <div class="card">
+      <b>A trail that only grows</b>
+      <span>Nothing in the code can delete, truncate or rotate it. Tests enforce that.</span>
+    </div>
+  </div>
+</header>
+
+<div class="page">
+  <aside class="toc">
+    <ol>
+      <li><a href="#what">What it is</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a href="#quickstart">First run</a></li>
+      <li><a href="#targets">Register a target</a></li>
+      <li><a href="#users">Users and keys</a></li>
+      <li><a href="#policy">Write a policy</a></li>
+      <li><a href="#jit">Ask for access</a></li>
+      <li><a href="#connecting">Connect</a></li>
+      <li><a href="#recordings">Recordings</a></li>
+      <li><a href="#console">The console</a></li>
+      <li><a href="#audit">The audit trail</a></li>
+      <li><a href="#production">Before production</a></li>
+      <li><a href="#excluded">What it will not do</a></li>
+    </ol>
+  </aside>
+
+  <main class="body">
+
+    <section id="what">
+      <h2>What it is</h2>
+      <p>
+        Most bastions are a credential vault with a proxy attached: they store target passwords,
+        rotate them, and hand them out. That concentrates every standing credential in the estate
+        onto the one host an attacker most wants.
+      </p>
+      <p>
+        This inverts it. The platform is a certificate authority client, not a vault. There is no
+        target password and no target private key in the binary or its database. When a session is
+        authorised, the gateway mints a certificate scoped to one principal, one target, one session
+        id, a validity window measured in minutes, and the source address that asked for it. The
+        target's own <code>sshd</code> enforces all of that — not this code.
+      </p>
+      <p>
+        <strong>The certificate never reaches the user.</strong> They are handed a connection, not a
+        credential. That is what makes recording unbypassable and revocation immediate: closing the
+        socket ends the session, because there is no other way in.
+      </p>
+    </section>
+
+    <section id="install">
+      <h2>Install</h2>
+      <p>
+        One binary — <code>marac</code> — which is the control plane, the SSH gateway, the web
+        console and the client at once. Download a release archive, or build from source with Go
+        1.26 and nothing else.
+      </p>
+<pre><code>curl -fsSLO https://github.com/MarStack-Labs/marstack-access/releases/latest/download/marac_v0.1.0_linux_amd64.tar.gz
+curl -fsSLO https://github.com/MarStack-Labs/marstack-access/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+
+tar -xzf marac_v0.1.0_linux_amd64.tar.gz
+sudo install -m 0755 marac /usr/local/bin/marac
+marac version</code></pre>
+      <p>From source:</p>
+<pre><code>git clone https://github.com/MarStack-Labs/marstack-access.git
+cd marstack-access
+make build
+./bin/marac version</code></pre>
+      <p>
+        A small VPS is enough. No hypervisor, no privileged container, no kernel modules, no
+        database server — state is one SQLite file under the data directory.
+      </p>
+    </section>
+
+    <section id="quickstart">
+      <h2>First run</h2>
+<pre><code>marac server</code></pre>
+      <p>
+        The control plane comes up on <code>127.0.0.1:7443</code>. The SSH listener does not: a
+        security product should not open a port nobody asked for. On the very first start the
+        gateway creates one admin account and writes its token to
+        <code>./data/bootstrap-token</code>, warning you to read it and delete the file.
+      </p>
+<pre><code>export MARAC_ENDPOINT=http://127.0.0.1:7443
+export MARAC_TOKEN=$(cat ./data/bootstrap-token)
+rm ./data/bootstrap-token
+
+marac user list</code></pre>
+      <div class="note" data-tone="info">
+        <p>
+          A token looks like <code>mat_&lt;selector&gt;_&lt;verifier&gt;</code>. It is shown once, at
+          issue, and never again — nothing stores it, nothing logs it, and no endpoint can produce it
+          a second time. Losing one means issuing another.
+        </p>
+      </div>
+    </section>
+
+    <section id="targets">
+      <h2>Register a target</h2>
+      <p>
+        A target is a host the platform may reach, and the accounts it will accept a session as.
+        Registering it does not grant anyone access to it.
+      </p>
+<pre><code>marac target register \
+  --name db-primary \
+  --address 10.20.0.11 \
+  --principal deploy \
+  --principal readonly</code></pre>
+
+      <h3>Pin its host key</h3>
+      <p>
+        <strong>A target with no pinned host key cannot be connected to at all.</strong> Its identity
+        cannot be verified, so a session to it is refused before it is opened — there is no
+        trust-on-first-use and no way to disable the check.
+      </p>
+<pre><code>ssh-keyscan -t ed25519 10.20.0.11 | marac target trust tgt-xxxxxxxxxxxxx</code></pre>
+      <p>
+        Compare the fingerprint against what the host itself reports before you accept it. Replacing
+        an existing pin has to be asked for explicitly.
+      </p>
+
+      <h3>Let the target trust the CA</h3>
+      <p>
+        This is the whole of the agent-side installation. <code>marac ca init</code> prints exactly
+        what to add:
+      </p>
+<pre><code># /etc/ssh/sshd_config
+TrustedUserCAKeys        /etc/ssh/marac-ca.pub
+AuthorizedPrincipalsFile /etc/ssh/principals/%u</code></pre>
+      <p>
+        The first line says which authority the host trusts. The second says which names it will
+        accept. From then on <code>sshd</code> enforces the principal, the expiry and the source
+        address on every certificate — so a bug in this code cannot hand out access the host has not
+        agreed to.
+      </p>
+    </section>
+
+    <section id="users">
+      <h2>Users and keys</h2>
+      <p>
+        Two credentials, for two different doors. An <strong>API token</strong> talks to the control
+        plane. An <strong>SSH public key</strong> is how the front door recognises you.
+      </p>
+<pre><code>marac user create --name rina --role operator
+marac token issue --user usr-xxxxxxxxxxxxx
+
+marac key add --user usr-xxxxxxxxxxxxx --name laptop &lt; ~/.ssh/id_ed25519.pub</code></pre>
+      <div class="scroller">
+        <table>
+          <thead>
+            <tr><th>Role</th><th>Can</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>viewer</code></td><td>read version and health</td></tr>
+            <tr><td><code>operator</code></td><td>targets, sessions, raise and withdraw access requests</td></tr>
+            <tr><td><code>admin</code></td><td>users, tokens, policies, approve and deny, kill sessions, read the audit trail</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        A key carries no privilege of its own; the account's role and policies decide everything.
+        <code>ssh-dss</code> and RSA under 2048 bits are refused when the key is added, rather than
+        when a session fails at 3am.
+      </p>
+    </section>
+
+    <section id="policy">
+      <h2>Write a policy</h2>
+      <p>
+        A policy answers "may this subject reach <em>that host</em> as <em>that account</em>". A role
+        never implies it.
+      </p>
+<pre><code>marac policy create \
+  --name rina-db \
+  --user usr-xxxxxxxxxxxxx \
+  --target tgt-xxxxxxxxxxxxx \
+  --principal readonly</code></pre>
+      <p>
+        A policy naming a principal the target does not accept is refused at creation, not at
+        connection time. Writing policy is <code>admin</code>; an operator who could write it could
+        write themselves one.
+      </p>
+      <div class="note" data-tone="info">
+        <p>
+          <strong>A policy grants nothing on its own.</strong> It is an upper bound. Reaching the
+          host still needs an approved request inside its window.
+        </p>
+      </div>
+    </section>
+
+    <section id="jit">
+      <h2>Ask for access</h2>
+      <p>
+        Nothing raises a request automatically. An <code>ssh</code> attempt with no grant is refused
+        and that is the end of it — a gateway that queued a request on every failed attempt would let
+        anyone with a policy flood the approval queue.
+      </p>
+<pre><code>marac request create \
+  --target tgt-xxxxxxxxxxxxx \
+  --principal readonly \
+  --reason "investigating slow queries on the reporting replica, INC-4471" \
+  --ttl 2h</code></pre>
+      <p>
+        A reason is required. It is the only part of the record a later reader cannot reconstruct
+        from anything else. The default grant is one hour and the maximum is twelve; a pending
+        request expires by itself after a day, so the queue does not silt up.
+      </p>
+      <p>Someone else decides it:</p>
+<pre><code>marac request list
+marac request approve req-xxxxxxxxxxxxx
+marac request deny    req-xxxxxxxxxxxxx</code></pre>
+      <div class="note" data-tone="warn">
+        <p>
+          <strong>A request cannot be decided by the account that raised it — including an admin.</strong>
+          The grant window starts when it is approved, not when it was asked for. Expiry is computed
+          from the clock rather than stored as state, so there is no reaper job that can quietly stop
+          running and leave access alive.
+        </p>
+      </div>
+    </section>
+
+    <section id="connecting">
+      <h2>Connect</h2>
+      <p>Start the data plane, and point it at a signing key:</p>
+<pre><code>marac ca init --path ./data/ca
+marac server --ssh-listen 0.0.0.0:2222 --dev-ca-key ./data/ca</code></pre>
+      <p>Then a plain <code>ssh</code> client. The username carries the destination:</p>
+<pre><code>ssh -p 2222 readonly:db-primary@gateway</code></pre>
+      <p>
+        That reads as "take me to <code>db-primary</code>, landing as <code>readonly</code>". Five
+        checks run in order, and a refusal says which one refused:
+      </p>
+      <div class="scroller">
+        <table>
+          <thead>
+            <tr><th>#</th><th>Question</th><th>Refused when</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>1</td><td>Does the target exist?</td><td>it is not registered</td></tr>
+            <tr><td>2</td><td>Does it accept this principal?</td><td>the account is not one it allows</td></tr>
+            <tr><td>3</td><td>Is its host key pinned?</td><td>its identity cannot be verified</td></tr>
+            <tr><td>4</td><td>Does a policy allow it?</td><td>no policy covers this combination</td></tr>
+            <tr><td>5</td><td>Is a grant live?</td><td>no approved, unexpired request</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        An unregistered key gets <code>Permission denied (publickey)</code> and learns nothing about
+        what exists behind the gateway. Everything after that names the check, because a caller who
+        has proved who they are gains nothing from a blank refusal.
+      </p>
+
+      <h3>What the gateway keeps refusing</h3>
+      <p>
+        Accepting a session is not stepping aside. For the whole life of the connection the gateway
+        answers every channel request the client makes:
+      </p>
+<pre><code>session channel      accepted
+anything else        rejected      ← ssh -L dies here
+pty-req, shell, exec accepted
+env, window-change   accepted
+auth-agent-req       refused
+x11-req              refused
+subsystem            refused       ← no sftp, no scp
+tcpip-forward        refused       ← ssh -R dies here</code></pre>
+      <p>
+        A gateway that forwards ports is a route into the network that no policy describes and no
+        recording captures.
+      </p>
+    </section>
+
+    <section id="recordings">
+      <h2>Recordings</h2>
+      <p>
+        Every session is recorded as asciicast v2, and <strong>a session that cannot be recorded does
+        not open</strong> — the recorder is opened before the target is dialled, and there is no flag
+        to turn it off.
+      </p>
+<pre><code>asciinema play data/recordings/ses-xxxxxxxxxxxxx.cast
+grep -o 'sudo [^"]*' data/recordings/*.cast</code></pre>
+      <p>
+        Only output is recorded. A shell echoes what is typed, so commands stay greppable — but a
+        password typed at a <code>sudo</code> prompt is never echoed and so is never written down.
+        That is a property of recording output rather than a filter that has to be maintained.
+      </p>
+      <p>Ship them somewhere the gateway cannot reach back into:</p>
+<pre><code>export MARAC_S3_ACCESS_KEY=... MARAC_S3_SECRET_KEY=...
+marac server --ssh-listen 0.0.0.0:2222 --dev-ca-key ./data/ca \
+  --recording-endpoint https://minio.internal:9000 \
+  --recording-bucket marac-recordings \
+  --recording-retain-for 2160h</code></pre>
+      <p>
+        The bucket must be created with object lock enabled — <code>mc mb --with-lock</code> — because
+        it cannot be turned on afterwards. Credentials come from the environment rather than flags,
+        since a secret on a command line is visible in <code>ps</code>.
+      </p>
+    </section>
+
+    <section id="console">
+      <h2>The console</h2>
+      <p>
+        A web console ships inside the binary at <code>/console/</code>. Five screens: sessions,
+        requests, targets, policies, and the tail of the audit trail. No build step, no
+        <code>node_modules</code>, nothing fetched at runtime.
+      </p>
+      <p>
+        Sign in by pasting the same API token <code>marac</code> uses. The page swaps it immediately
+        for an <code>HttpOnly</code> cookie it cannot read, so an injected script cannot steal the
+        credential. Because the cookie carries the token itself rather than a new session id,
+        revoking the token closes the console at the same instant it closes every CLI using it.
+      </p>
+      <p>
+        Everything the console shows comes from the same guarded API under the caller's own role. A
+        viewer signing in is refused the session list here exactly as on the command line, and told
+        why rather than shown an empty table.
+      </p>
+      <div class="note" data-tone="warn">
+        <p>
+          <strong>It will not open a session over cleartext.</strong> Reach it over HTTPS, or
+          terminate TLS in a proxy on the same host so the hop to the gateway stays on loopback.
+          <code>http://127.0.0.1</code> works for local development.
+        </p>
+      </div>
+    </section>
+
+    <section id="audit">
+      <h2>The audit trail</h2>
+      <p>
+        Every change and every decision is recorded. Nothing in this codebase can delete, truncate,
+        or rotate the trail, and an architecture test fails the build if a sink grows a method that
+        could.
+      </p>
+<pre><code>target.registered       allowed  admin  tgt-cgrne5bf33bct
+target.host_key_pinned  allowed  admin  tgt-cgrne5bf33bct
+request.raised          allowed  rina   req-7b6q3sjrrff8w
+request.approved        allowed  admin  req-7b6q3sjrrff8w
+api.denied              denied   rina   insufficient_role
+api.denied              denied   -      missing_token</code></pre>
+      <p>
+        A requester and an approver are always different accounts in the trail. That is what
+        self-approval being impossible looks like from the outside.
+      </p>
+      <p>
+        By default the trail is a local append-only file, which survives a crash but not whoever owns
+        the host. Ship it:
+      </p>
+<pre><code>marac server --audit-loki-url http://loki:3100</code></pre>
+      <p>
+        Shipping never fails a session — if Loki is down the event is already on disk and the drop is
+        counted. Reads are not recorded, and a token secret never is.
+      </p>
+    </section>
+
+    <section id="production">
+      <h2>Before production</h2>
+      <div class="note" data-tone="danger">
+        <p>
+          <strong>The signing key has no home outside the gateway process.</strong> It sits in the
+          file named by <code>--dev-ca-key</code>, and anyone who can read that file — or the memory
+          of the process — can mint access to every target that trusts the CA. Moving it behind a
+          signing call in <code>marstack-secrets</code> is planned and not built.
+        </p>
+        <p>
+          This is the largest open item in the project and it is written up in full as invariant 3
+          of
+          <a href="https://github.com/MarStack-Labs/marstack-access/blob/main/docs/SECURITY.md">docs/SECURITY.md</a>.
+        </p>
+      </div>
+      <p>Three more things worth knowing before you rely on this:</p>
+      <ul>
+        <li>
+          <strong>A grant expiring does not end a session already open.</strong> The check runs once,
+          before the session opens. Close it with <code>marac session kill</code>.
+        </li>
+        <li>
+          <strong>The SigV4 signing has never been checked against a real MinIO.</strong> A
+          canonicalisation mistake would surface as a 403 from the store, not as a failing test.
+        </li>
+        <li>
+          <strong>Control plane audit events are written after the change commits</strong>, so a
+          crash in between loses the event while keeping the change. The session path does not have
+          this problem — its row and its recording are both opened before the target is touched.
+        </li>
+      </ul>
+      <p>
+        This list is not marketing copy with the awkward parts removed. It is the same list the
+        repository keeps under "What is not covered yet", and it is kept current in the same commit
+        as the code.
+      </p>
+    </section>
+
+    <section id="excluded">
+      <h2>What it will not do</h2>
+      <p>These are excluded by design, not pending.</p>
+      <div class="scroller">
+        <table>
+          <thead>
+            <tr><th>Not supported</th><th>Because</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>RDP, VNC</td>
+              <td>a graphical session cannot be audited without pixels, and this platform records text</td>
+            </tr>
+            <tr>
+              <td>Video recording</td>
+              <td>unsearchable, and it drags in transcoding, retention and a player</td>
+            </tr>
+            <tr>
+              <td>Command blocking by pattern</td>
+              <td>a PTY byte stream is not a command list; every blacklist is trivially bypassed</td>
+            </tr>
+            <tr>
+              <td>A credential vault for targets</td>
+              <td>reintroduces the standing credential the design exists to remove</td>
+            </tr>
+            <tr>
+              <td>Device posture checks</td>
+              <td>meaningless without hardware attestation, which is a separate product</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer class="site">
+  Apache License 2.0 ·
+  <a href="https://github.com/MarStack-Labs/marstack-access">Source</a> ·
+  <a href="https://github.com/MarStack-Labs/marstack-access/blob/main/docs/SECURITY.md">Security design</a> ·
+  <a href="https://github.com/MarStack-Labs/marstack-access/blob/main/docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="https://github.com/MarStack-Labs/marstack-access/security/advisories/new">Report a vulnerability</a>
+</footer>
+
+</body>
+</html>

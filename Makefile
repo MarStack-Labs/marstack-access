@@ -9,7 +9,7 @@ PREFIX ?= /usr/local
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 SHA256    := $(shell command -v sha256sum >/dev/null 2>&1 && echo "sha256sum" || echo "shasum -a 256")
 
-.PHONY: build install uninstall dist test vet fmt staticcheck vuln gosec secrets security check tools hooks run clean
+.PHONY: build install uninstall site dist test vet fmt staticcheck vuln gosec secrets security check tools hooks run clean
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/marac ./cmd/marac
@@ -20,6 +20,9 @@ install:
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/marac
+
+site:
+	cp internal/console/assets/meridian.css site/meridian.css
 
 dist:
 	rm -rf dist && mkdir -p dist
