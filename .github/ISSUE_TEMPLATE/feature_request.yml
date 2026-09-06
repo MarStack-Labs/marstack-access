@@ -1,0 +1,53 @@
+name: Feature request
+description: Propose something the platform should do and does not
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Some things are excluded by design rather than missing — RDP and VNC, video recording,
+        command blocking by pattern, a credential vault for targets, and device posture checks.
+        Each is argued in
+        [docs/SECURITY.md](https://github.com/MarStack-Labs/marstack-access/blob/main/docs/SECURITY.md)
+        under "Excluded by design". Arguing against that reasoning is fair; not having read it is
+        the thing to avoid.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What you were trying to do, and where you got stuck. Describe the situation rather than the
+        feature — the best version of a proposal often turns out to be a different feature.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you think should happen
+      description: If you have a shape in mind, sketch it. A command line or an endpoint is enough.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you are doing instead today
+      description: >
+        Even an ugly workaround is useful: it shows how much this costs, and sometimes it turns out
+        to be good enough to document rather than replace.
+
+  - type: dropdown
+    id: security
+    attributes:
+      label: Does this change what the gateway is trusted with?
+      description: >
+        Anything touching authentication, authorization, certificates, recording, or the audit
+        trail needs the invariants in docs/SECURITY.md checked against it before it is designed.
+      options:
+        - "No — it does not touch any of those"
+        - "Yes — and I have read the invariants"
+        - "I am not sure"
+    validations:
+      required: true

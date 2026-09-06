@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/MarStack-Labs/marstack-access/security/advisories/new
+    about: Privately, through a GitHub security advisory. Never as a public issue.
+  - name: Ask a question
+    url: https://github.com/MarStack-Labs/marstack-access/discussions
+    about: How something works, or whether an approach makes sense before you build it.

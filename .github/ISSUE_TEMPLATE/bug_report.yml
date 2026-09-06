@@ -1,0 +1,68 @@
+name: Bug report
+description: Something behaves differently from what the documentation says
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this is a security vulnerability, stop and read
+        [SECURITY.md](https://github.com/MarStack-Labs/marstack-access/blob/main/SECURITY.md)
+        instead. Do not describe it here.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, and what the gateway did instead of what you expected.
+      placeholder: |
+        Ran `marac session kill ses-...` as an admin and got 404, but `marac session list`
+        shows the session as active.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce it
+      description: >
+        The commands in order, starting from a fresh `marac server` if you can. Redact tokens,
+        addresses, and anything else you would not want indexed — a redacted report is still useful.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and where you got that expectation
+      description: >
+        A line from the README or docs, a flag's help text, or an error message that says otherwise.
+        If the documentation is what is wrong, that is a valid bug and worth saying so.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `marac version`.
+      placeholder: v0.1.0 (abc1234)
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: Ubuntu 24.04, amd64
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: >
+        The gateway logs a request id on every response. Including it lets the lines be matched up.
+        Certificates, tokens, and key material are never logged, but check anyway before pasting.
+      render: text
