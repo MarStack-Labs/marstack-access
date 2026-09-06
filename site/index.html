@@ -97,13 +97,21 @@
         console and the client at once. Download a release archive, or build from source with Go
         1.26 and nothing else.
       </p>
-<pre><code>curl -fsSLO https://github.com/MarStack-Labs/marstack-access/releases/latest/download/marac_v0.1.0_linux_amd64.tar.gz
-curl -fsSLO https://github.com/MarStack-Labs/marstack-access/releases/latest/download/SHA256SUMS
+<pre><code>VERSION=v0.1.0
+BASE=https://github.com/MarStack-Labs/marstack-access/releases/download/$VERSION
+
+curl -fsSLO $BASE/marac_${VERSION}_linux_amd64.tar.gz
+curl -fsSLO $BASE/SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
 
-tar -xzf marac_v0.1.0_linux_amd64.tar.gz
+tar -xzf marac_${VERSION}_linux_amd64.tar.gz
 sudo install -m 0755 marac /usr/local/bin/marac
 marac version</code></pre>
+      <p>
+        Archives are published for <code>linux/amd64</code>, <code>linux/arm64</code>,
+        <code>darwin/amd64</code> and <code>darwin/arm64</code>. Check the checksum before you
+        install it — an access gateway is a poor thing to take on trust.
+      </p>
       <p>From source:</p>
 <pre><code>git clone https://github.com/MarStack-Labs/marstack-access.git
 cd marstack-access
